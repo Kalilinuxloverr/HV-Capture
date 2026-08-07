@@ -97,6 +97,18 @@ final class ArcController {
         return Swift.min(Swift.max(v, 10), 300)
     }
 
+    /// Fenster für die aktuelle Betriebsart.
+    ///
+    /// Bei der Totmann-Taste bewusst kurz: das Loslassen wird über das
+    /// Gesten-Ende erkannt, und das feuert nicht garantiert — eine abgebrochene
+    /// Geste, ein Systemdialog oder ein eingehender Anruf können es
+    /// verschlucken. Dann bleibt die kurze Selbstabschaltung in der Dose die
+    /// einzige Instanz, die noch abschaltet, und drei Sekunden sind näher an
+    /// dem, was ein Totmannschalter verspricht, als dreissig.
+    var effectiveWatchdogWindow: Int {
+        mode == .deadManSwitch ? 3 : watchdogWindow
+    }
+
     var timerSeconds: Int {
         let v = UserDefaults.standard.object(forKey: "timerSeconds") as? Int ?? 30
         return Swift.min(Swift.max(v, 1), 3600)
@@ -137,7 +149,7 @@ final class ArcController {
 
         // Selbstabschaltung ZUERST setzen, dann einschalten — nie andersherum,
         // sonst läuft der Aufbau kurz ohne jede Absicherung.
-        plug.startWatchdog(window: watchdogWindow)
+        plug.startWatchdog(window: effectiveWatchdogWindow)
         try? await Task.sleep(for: .milliseconds(120))
 
         guard await plug.setPower(true) else {
@@ -151,6 +163,7 @@ final class ArcController {
         isArmed = true
         plug.setFast(true)
         statusMessage = nil
+        LiveActivityController.start(modeLabel: mode.label)
         startModeTask()
         return true
     }
@@ -169,6 +182,7 @@ final class ArcController {
         await plug.stopWatchdog()
         _ = recorder.stop()
         LiveTheme.shared.reset()
+        LiveActivityController.end(tripLabel: reason.requiresAcknowledgement ? reason.label : nil)
     }
 
     /// Not-Aus — schaltet sofort und fragt nicht nach.
@@ -199,6 +213,11 @@ final class ArcController {
         let decision = arcGuard.evaluate(reading)
         arcBurning = decision.arcBurning
         recorder.ingest(reading, decision: decision)
+        LiveActivityController.update(watts: reading?.watts, amps: reading?.amps,
+                                      volts: reading?.volts,
+                                      secondsRemaining: secondsRemaining,
+                                      armed: isArmed, arcBurning: decision.arcBurning,
+                                      tripLabel: decision.trip?.label)
 
         if let trip = decision.trip {
             pendingTrip = TripRecord(reason: trip, detail: decision.detail, date: Date())

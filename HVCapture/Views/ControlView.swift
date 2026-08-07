@@ -343,6 +343,13 @@ private struct DeadManButton: View {
                     Task { await controller.deadManReleased() }
                 }
         )
+        // Verschwindet die Ansicht mitten im Halten (Tab-Wechsel, Sheet), wird
+        // `onEnded` nie gerufen. Ohne das hier bliebe eingeschaltet.
+        .onDisappear {
+            guard holding else { return }
+            holding = false
+            Task { await controller.deadManReleased() }
+        }
         .accessibilityLabel("Totmann-Taste, halten zum Einschalten, loslassen schaltet ab")
         .accessibilityAddTraits(.isButton)
     }
