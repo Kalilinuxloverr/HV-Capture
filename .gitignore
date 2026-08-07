@@ -1,0 +1,17 @@
+# XcodeGen erzeugt das Projekt aus project.yml — nicht einchecken
+HVCapture.xcodeproj/
+
+# Xcode
+xcuserdata/
+DerivedData/
+build/
+*.xcuserstate
+*.xcscmblueprint
+
+# macOS
+.DS_Store
+
+# Swift Package Manager
+.build/
+.swiftpm/
+Packages/

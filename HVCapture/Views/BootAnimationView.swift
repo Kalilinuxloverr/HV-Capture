@@ -1,0 +1,1 @@
+// BootAnimationView.swift — HV-Capture

@@ -1,0 +1,70 @@
+name: HVCapture
+options:
+  bundleIdPrefix: dev.leonfrohlich
+  deploymentTarget:
+    iOS: "18.0"
+  createIntermediateGroups: true
+settings:
+  base:
+    SWIFT_VERSION: "5.0"
+    CODE_SIGN_STYLE: Automatic
+    CURRENT_PROJECT_VERSION: 1
+    MARKETING_VERSION: 1.0.0
+    GENERATE_INFOPLIST_FILE: YES
+targets:
+  HVCapture:
+    type: application
+    platform: iOS
+    sources:
+      - HVCapture
+    dependencies:
+      - target: HVCaptureWidgets
+        embed: true
+    info:
+      path: HVCapture/Info.plist
+      properties:
+        CFBundleDisplayName: HV-Capture
+        CFBundleDevelopmentRegion: de
+        CFBundleLocalizations: [de]
+        UILaunchScreen: {}
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+        NSCameraUsageDescription: "HV-Capture filmt und fotografiert die Lichtbögen deines Aufbaus."
+        NSMicrophoneUsageDescription: "HV-Capture nimmt den Ton der Lichtbögen auf und kann auf das Knallgeräusch hin auslösen."
+        NSPhotoLibraryAddUsageDescription: "HV-Capture sichert deine Aufnahmen in der Fotomediathek."
+        NSLocalNetworkUsageDescription: "HV-Capture spricht die Steckdose direkt im Heimnetz an, um den MOT zu schalten und den Strom zu überwachen."
+        NSSupportsLiveActivities: true
+        ITSAppUsesNonExemptEncryption: false
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: dev.leonfrohlich.hvcapture
+        TARGETED_DEVICE_FAMILY: "1"
+        INFOPLIST_KEY_UIUserInterfaceStyle: Dark
+
+  HVCaptureWidgets:
+    type: app-extension
+    platform: iOS
+    sources:
+      - Widgets
+      - path: HVCapture/Model/LiveState.swift
+      - path: HVCapture/Design/Palette.swift
+    info:
+      path: Widgets/Info.plist
+      properties:
+        CFBundleDisplayName: HV-Capture
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.widgetkit-extension
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: dev.leonfrohlich.hvcapture.widgets
+        TARGETED_DEVICE_FAMILY: "1"
+
+  HVCaptureTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+      - Tests
+    dependencies:
+      - target: HVCapture
