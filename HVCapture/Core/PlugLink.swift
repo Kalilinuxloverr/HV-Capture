@@ -376,7 +376,8 @@ final class PlugLink {
     }
 
     /// `{"POWER":"ON"}` — `nil`, wenn die Antwort den Zustand nicht enthält.
-    static func parsePowerState(_ data: Data) -> Bool? {
+    /// Reiner Parser ohne Zustand, deshalb ausserhalb der MainActor-Isolation.
+    nonisolated static func parsePowerState(_ data: Data) -> Bool? {
         guard let s = String(data: data, encoding: .utf8) else { return nil }
         if s.contains("\"POWER\":\"ON\"") { return true }
         if s.contains("\"POWER\":\"OFF\"") { return false }

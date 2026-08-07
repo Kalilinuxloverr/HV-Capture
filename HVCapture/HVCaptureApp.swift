@@ -200,7 +200,8 @@ final class ArcController {
     // MARK: Messwertstrom
 
     private func handle(_ reading: Reading?) {
-        LiveTheme.shared.feed(reading?.watts)
+        LiveTheme.shared.feed(watts: reading?.watts)
+        CaptureEngine.shared.externalPowerSignal(watts: reading?.watts)
 
         // Während der Kalibrierung wird nur gesammelt, nicht bewertet.
         if calibrating {
