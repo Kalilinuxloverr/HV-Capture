@@ -222,6 +222,11 @@ final class ArcController {
         if let trip = decision.trip {
             pendingTrip = TripRecord(reason: trip, detail: decision.detail, date: Date())
             Haptics.error()
+            // Sofort synchron entschärfen: das eigentliche Abschalten ist
+            // asynchron, und bis es durch ist, kämen sonst weitere Messwerte
+            // hier an und würden denselben Vorgang mehrfach anstossen.
+            isArmed = false
+            arcGuard.disarm()
             Task { await disarm(reason: trip) }
         }
     }
