@@ -109,12 +109,31 @@ sich Wächter und Oberfläche ohne angeschlossene Hardware prüfen lassen.
 ```
 HVCapture/
   Model/    reine Werte, ohne Abhängigkeiten
-  Core/     PlugLink (HTTP), ArcGuard (Bewertung), SessionStore, CaptureEngine
+  Core/     PlugLink (HTTP), ArcGuard (Bewertung), SessionStore, CaptureEngine,
+            WatchBridge, ArcIntents
   Design/   Palette, Live-Theme, Komponenten
   Views/    Startanimation, Sicherheits-Gate, Steuerung, Kamera, Verlauf, Einstellungen
 Widgets/    Live Activity und Widget
+Watch/      Not-Aus am Handgelenk
 Tests/      Swift Testing
 ```
+
+## Stand
+
+Drei Targets bauen ohne Warnungen (App, Widget-Extension, Watch-App), 34 Tests
+laufen durch. Am echten Aufbau ist noch nichts davon erprobt — insbesondere
+diese Punkte gehören vor dem ersten scharfen Einsatz auf dem Tisch verifiziert:
+
+- Ob die Firmware `addRepeatingEventID` kennt. Tut sie es nicht, wechselt die
+  App auf den Rückfallweg und zeigt das an — der ist aber schwächer.
+- Ob die Selbstabschaltung tatsächlich auslöst, wenn man die App killt.
+- Ob die Flachheits-Grenzwerte zum eigenen Aufbau passen (Simulationsfall
+  „Wird konstant" im Dev-Mode prüft nur die Logik, nicht deine Zahlen).
+
+Nicht umgesetzt: das Einbrennen der Messwerte ins Video (die Einstellung
+existiert, die Engine wertet sie noch nicht aus) und ein Bedienweg für die
+Best-Frame-Extraktion (die Funktion existiert, die Clips liegen aber in der
+Fotomediathek und werden noch nicht per URL zurückgereicht).
 
 Das Design-Dokument liegt unter
 [`docs/superpowers/specs/`](docs/superpowers/specs/2026-08-08-hv-capture-design.md).

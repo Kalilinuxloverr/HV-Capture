@@ -44,10 +44,16 @@ Vier Ebenen, von außen nach innen. Nur die äußeren beiden sind verlässlich.
 4. **Stromwächter in der App:** Zwei Kriterien, beide einzeln abschaltbar,
    beide lösen sofort `Power Off` aus:
    - **Schwelle:** Strom über Grenzwert für länger als Haltezeit (Default 2,0 s).
-   - **Flachheit:** Strom über einem niedrigeren Verdachtswert *und* die
-     Streuung der letzten Sekunden unterschreitet ein Maß — ein echter Bogen
-     flackert, ein klebender Kurzschluss ist auffällig ruhig. Erkennt Kleben
-     unterhalb der harten Schwelle.
+   - **Flachheit:** Strom durchgehend über einem niedrigeren Verdachtswert *und*
+     die **Spannweite** (max − min) im Fenster unterschreitet ein Maß — ein
+     echter Bogen flackert, ein klebender Kurzschluss ist auffällig ruhig.
+     Erkennt Kleben unterhalb der harten Schwelle.
+
+     Bewusst Spannweite statt Standardabweichung: die App pollt schneller, als
+     der Messchip neue Werte liefert, also stehen im Fenster viele identische
+     Wiederholungen. Die drücken eine Standardabweichung künstlich gegen null
+     und würden mitten im echten Bogen auslösen. Auf max − min haben
+     Wiederholungen keinen Einfluss.
    Beide Grenzwerte kommen aus einer Kalibrierfahrt und bleiben in den
    Einstellungen von Hand justierbar.
 

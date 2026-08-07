@@ -214,6 +214,8 @@ final class ArcController {
         let decision = arcGuard.evaluate(reading)
         arcBurning = decision.arcBurning
         recorder.ingest(reading, decision: decision)
+        WatchBridge.shared.push(watts: reading?.watts, amps: reading?.amps,
+                                armed: isArmed, remaining: secondsRemaining)
         LiveActivityController.update(watts: reading?.watts, amps: reading?.amps,
                                       volts: reading?.volts,
                                       secondsRemaining: secondsRemaining,
@@ -297,6 +299,7 @@ struct HVCaptureApp: App {
     init() {
         PlugLink.shared.startPolling()
         SessionStore.shared.load()
+        WatchBridge.shared.activate()     // ohne Uhr schlicht wirkungslos
         _ = ArcController.shared          // verbindet den Messwertstrom
     }
 

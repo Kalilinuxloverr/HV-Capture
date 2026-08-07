@@ -3,6 +3,7 @@ options:
   bundleIdPrefix: dev.leonfrohlich
   deploymentTarget:
     iOS: "18.0"
+    watchOS: "10.0"
   createIntermediateGroups: true
 settings:
   base:
@@ -19,6 +20,8 @@ targets:
       - HVCapture
     dependencies:
       - target: HVCaptureWidgets
+        embed: true
+      - target: HVCaptureWatch
         embed: true
     info:
       path: HVCapture/Info.plist
@@ -60,6 +63,23 @@ targets:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: dev.leonfrohlich.hvcapture.widgets
         TARGETED_DEVICE_FAMILY: "1"
+
+  HVCaptureWatch:
+    type: application
+    platform: watchOS
+    sources:
+      - Watch
+    info:
+      path: Watch/Info.plist
+      properties:
+        CFBundleDisplayName: HV-Capture
+        CFBundleDevelopmentRegion: de
+        WKApplication: true
+        WKCompanionAppBundleIdentifier: dev.leonfrohlich.hvcapture
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: dev.leonfrohlich.hvcapture.watchkitapp
+        INFOPLIST_KEY_UIUserInterfaceStyle: Dark
 
   HVCaptureTests:
     type: bundle.unit-test
