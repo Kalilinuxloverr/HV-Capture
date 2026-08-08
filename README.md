@@ -82,6 +82,15 @@ xcodegen generate
 open HVCapture.xcodeproj
 ```
 
+Das App-Icon ist gezeichnet, nicht gemalt: `tools/RenderIcon.swift` erzeugt die
+drei Varianten (hell, dunkel, getönt) mit CoreGraphics. Motiv ist die
+Jakobsleiter aus der Startanimation — zwei divergierende Elektroden mit einem
+Bogen dazwischen. Ändern und neu erzeugen:
+
+```sh
+swift tools/RenderIcon.swift HVCapture/Assets.xcassets/AppIcon.appiconset
+```
+
 Tests:
 
 ```sh
