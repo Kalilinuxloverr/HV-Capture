@@ -9,6 +9,9 @@ settings:
   base:
     SWIFT_VERSION: "5.0"
     CODE_SIGN_STYLE: Automatic
+    # Ohne Team scheitert die Signierung fürs echte Gerät (im Simulator läuft es
+    # auch ohne). Gleiche Team-ID wie die übrigen Projekte hier.
+    DEVELOPMENT_TEAM: 7BT7N2JPSQ
     CURRENT_PROJECT_VERSION: 1
     MARKETING_VERSION: 1.0.0
     GENERATE_INFOPLIST_FILE: YES
