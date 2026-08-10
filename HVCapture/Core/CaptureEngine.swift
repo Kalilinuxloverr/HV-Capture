@@ -452,7 +452,9 @@ final class CaptureEngine: NSObject {
     private func saveVideo(_ url: URL) async {
         guard await ensurePhotoAccess() else { return }
         do {
-            let album = try await Self.album()
+            // try?: Scheitert das Album (z. B. „Ausgewählte Fotos"), wird trotzdem
+            // gesichert — nur eben ohne Album. Sichern geht vor Sortieren.
+            let album = try? await Self.album()
             try await PHPhotoLibrary.shared().performChanges {
                 guard let req = PHAssetChangeRequest.creationRequestForAssetFromVideo(atFileURL: url)
                 else { return }
@@ -470,7 +472,7 @@ final class CaptureEngine: NSObject {
     private func savePhoto(_ data: Data) async {
         guard await ensurePhotoAccess() else { return }
         do {
-            let album = try await Self.album()
+            let album = try? await Self.album()
             try await PHPhotoLibrary.shared().performChanges {
                 let req = PHAssetCreationRequest.forAsset()
                 req.addResource(with: .photo, data: data, options: nil)
@@ -487,7 +489,10 @@ final class CaptureEngine: NSObject {
     }
 
     private func ensurePhotoAccess() async -> Bool {
-        let status = await PHPhotoLibrary.requestAuthorization(for: .addOnly)
+        // .readWrite statt .addOnly: album() muss die Mediathek LESEN, um das
+        // Album zu finden — mit .addOnly killt TCC die App beim ersten Sichern
+        // (real passiert am 10.08., Crash-Report HVCapture-2026-08-10-210845).
+        let status = await PHPhotoLibrary.requestAuthorization(for: .readWrite)
         guard status == .authorized || status == .limited else {
             lastError = "Ohne Zugriff auf die Fotomediathek kann nichts gesichert werden."
             return false
