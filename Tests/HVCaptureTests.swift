@@ -416,3 +416,80 @@ struct AggregateTests {
         #expect(kupfer?.lastUsed == base.addingTimeInterval(120))
     }
 }
+
+// MARK: - Energie & Kosten
+
+@Suite("EnergyCost")
+struct EnergyCostTests {
+    /// Gregorianisch, Wien, Woche ab Montag — fixiert, damit der Test nicht von
+    /// der Regionseinstellung des Testrechners abhängt.
+    private var cal: Calendar {
+        var c = Calendar(identifier: .gregorian)
+        c.timeZone = TimeZone(identifier: "Europe/Vienna")!
+        c.firstWeekday = 2
+        return c
+    }
+
+    private func date(_ y: Int, _ m: Int, _ d: Int, hour: Int = 12) -> Date {
+        DateComponents(calendar: cal, year: y, month: m, day: d, hour: hour).date!
+    }
+
+    /// Session mit exakt 1 Wh: zwei Messpunkte, 1 s Abstand, 3600 W.
+    private func session(started: Date) -> Session {
+        var s = Session(started: started)
+        s.samples = [Sample(t: 0, v: 230, a: 15.7, w: 3600),
+                     Sample(t: 1, v: 230, a: 15.7, w: 3600)]
+        return s
+    }
+
+    @Test("Summen buchen auf Tag, Woche, Monat und Gesamt")
+    func sums() {
+        // Mo 2026-08-10: heute. So 2026-08-09: Monat, aber nicht Woche. Juli: nur Gesamt.
+        let now = date(2026, 8, 10)
+        let all = [session(started: now.addingTimeInterval(-3600)),
+                   session(started: date(2026, 8, 9)),
+                   session(started: date(2026, 7, 15))]
+        let s = EnergyCost.sums(sessions: all, now: now, calendar: cal)
+        #expect(abs(s.todayKwh - 0.001) < 1e-9)
+        #expect(abs(s.weekKwh - 0.001) < 1e-9)
+        #expect(abs(s.monthKwh - 0.002) < 1e-9)
+        #expect(abs(s.alltimeKwh - 0.003) < 1e-9)
+    }
+
+    @Test("Tagesliste gruppiert nach Kalendertag, älteste zuerst")
+    func days() {
+        let all = [session(started: date(2026, 8, 9, hour: 9)),
+                   session(started: date(2026, 8, 9, hour: 21)),
+                   session(started: date(2026, 8, 10))]
+        let d = EnergyCost.days(sessions: all, calendar: cal)
+        #expect(d.count == 2)
+        #expect(d.first?.date == cal.startOfDay(for: date(2026, 8, 9)))
+        #expect(abs((d.first?.kwh ?? 0) - 0.002) < 1e-9)
+        #expect(abs((d.last?.kwh ?? 0) - 0.001) < 1e-9)
+    }
+
+    @Test("Euro aus kWh und ct/kWh")
+    func euro() {
+        #expect(EnergyCost.euro(2.0, ctPerKwh: 30) == 0.6)
+    }
+
+    @Test("aWATTar-Antwort wird geparst (Eur/MWh → ct/kWh, ms-Epoche)")
+    func awattarParse() throws {
+        let json = """
+        {"data":[{"start_timestamp":1754820000000,"end_timestamp":1754823600000,"marketprice":92.34},
+                 {"start_timestamp":1754823600000,"end_timestamp":1754827200000,"marketprice":-5.0}]}
+        """
+        let prices = Awattar.parse(Data(json.utf8))
+        #expect(prices.count == 2)
+        let first = try #require(prices.first)
+        #expect(abs(first.ctPerKwh - 9.234) < 1e-9)
+        #expect(first.start == Date(timeIntervalSince1970: 1_754_820_000))
+        #expect(prices.last?.ctPerKwh == -0.5)   // negative Börsenpreise gibt es wirklich
+    }
+
+    @Test("Kaputte aWATTar-Antwort ergibt leere Liste")
+    func awattarGarbage() {
+        #expect(Awattar.parse(Data("<html>".utf8)).isEmpty)
+        #expect(Awattar.parse(Data(#"{"data":"nope"}"#.utf8)).isEmpty)
+    }
+}

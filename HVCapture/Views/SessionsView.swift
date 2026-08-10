@@ -79,6 +79,16 @@ struct SessionsView: View {
                     .listRowSeparator(.hidden)
             }
 
+            Section {
+                NavigationLink {
+                    EnergyCostView()
+                } label: {
+                    Label("Energie & Kosten", systemImage: "eurosign.circle")
+                }
+                .listRowBackground(Palette.card)
+                .accessibilityLabel("Energie und Kosten")
+            }
+
             if !store.electrodeWear.isEmpty {
                 Section("Elektroden") {
                     ForEach(store.electrodeWear) { wear in
