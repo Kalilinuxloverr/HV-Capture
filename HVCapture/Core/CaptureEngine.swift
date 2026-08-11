@@ -69,8 +69,12 @@ private enum CaptureDefaults {
     static let postRollSeconds = 3.0
     static let brightnessDelta = 0.18
     static let audioDelta = 0.25
-    static let exposureDuration = 1.0 / 1000
-    static let exposureISO = 50.0
+    // Bogen-Belichtung ist Opt-in (Knopf im Sucher), nicht mehr Standard: die
+    // alten Werte (1/1000 s, ISO 50) haben ausser dem Bogen alles schwarz
+    // gemacht. Auch das Preset selbst ist jetzt milder — dunkel genug, dass
+    // der Bogen Struktur behält, hell genug, dass die Szene erkennbar bleibt.
+    static let exposureDuration = 1.0 / 250
+    static let exposureISO = 200.0
     static let albumName = "HV-Capture"
     /// Sperrzeit nach einem Auslöser — ein Ereignis soll einmal gesichert
     /// werden, nicht zehnmal.
@@ -91,6 +95,10 @@ final class CaptureEngine: NSObject {
     private(set) var permissionDenied = false
     private(set) var lastError: String?
     private(set) var lastSavedName: String?
+    /// Letzte Aufnahme für die Vorschau im Sucher — es ist immer nur eines
+    /// von beiden gesetzt (Clip oder Foto, das jeweils neuere).
+    private(set) var lastClipURL: URL?
+    private(set) var lastPhoto: UIImage?
     private(set) var bufferedSeconds: Double = 0
     private(set) var audioLevel: Double = 0
     private(set) var spectrum: [Double] = Array(repeating: 0, count: 16)
@@ -210,7 +218,10 @@ final class CaptureEngine: NSObject {
         session.commitConfiguration()
 
         if mode == .slowMotion { applyHighFrameRate() }
-        if (UserDefaults.standard.object(forKey: "manualExposure") as? Bool) ?? true {
+        // Standard ist Belichtungs-Automatik — die macht nachts brauchbare
+        // Videos (Szene + Bogen), siehe iPad-Vergleich vom 11.08. Die dunkle
+        // Bogen-Belichtung gibt es weiterhin als Knopf im Sucher.
+        if (UserDefaults.standard.object(forKey: "manualExposure") as? Bool) ?? false {
             applyArcPreset()
         }
 
@@ -319,6 +330,11 @@ final class CaptureEngine: NSObject {
         lastTriggerAt = now
         lastTrigger = source
         Haptics.light()
+        if mode == .photo {
+            // Serienfotos: jeder Auslöser macht ein Foto statt eines Clips.
+            capturePhoto()
+            return
+        }
         isRecording = true
         let post = postRoll
         let r = q.ring
@@ -375,6 +391,12 @@ final class CaptureEngine: NSObject {
             }
             lastSavedName = url.lastPathComponent
             SessionRecorder.shared.addMedia(url.lastPathComponent)
+            // Vorschau: die tmp-Datei bleibt liegen, die vorherige fliegt raus.
+            if let old = lastClipURL, old != url {
+                try? FileManager.default.removeItem(at: old)
+            }
+            lastClipURL = url
+            lastPhoto = nil
         } catch {
             lastError = "Sichern fehlgeschlagen: \(error.localizedDescription)"
         }
@@ -394,6 +416,11 @@ final class CaptureEngine: NSObject {
             let name = "Foto \(Date().formatted(date: .omitted, time: .standard))"
             lastSavedName = name
             SessionRecorder.shared.addMedia(name)
+            if let old = lastClipURL {
+                try? FileManager.default.removeItem(at: old)
+            }
+            lastClipURL = nil
+            lastPhoto = UIImage(data: data)
         } catch {
             lastError = "Sichern fehlgeschlagen: \(error.localizedDescription)"
         }
@@ -601,7 +628,17 @@ extension CaptureEngine: AVCapturePhotoCaptureDelegate {
     nonisolated func photoOutput(_ output: AVCapturePhotoOutput,
                                  didFinishProcessingPhoto photo: AVCapturePhoto,
                                  error: Error?) {
-        guard error == nil, let data = photo.fileDataRepresentation() else { return }
+        // Fehler sichtbar machen statt still zu schlucken — „Fotos gehen nicht"
+        // war sonst nicht diagnostizierbar.
+        if let error {
+            let text = error.localizedDescription
+            Task { @MainActor [weak self] in self?.lastError = "Foto fehlgeschlagen: \(text)" }
+            return
+        }
+        guard let data = photo.fileDataRepresentation() else {
+            Task { @MainActor [weak self] in self?.lastError = "Foto ohne Bilddaten." }
+            return
+        }
         Task { @MainActor [weak self] in await self?.savePhoto(data) }
     }
 }

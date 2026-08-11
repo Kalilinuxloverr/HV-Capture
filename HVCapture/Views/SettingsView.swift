@@ -82,9 +82,9 @@ struct SettingsView: View {
     @State private var showDev = false
 
     // Nur in dieser Datei — die Aufnahme-Engine liest denselben Schlüssel.
+    // „clip" ist Geschichte: Video heisst immer Ringpuffer + Auslöser-Clips.
     private let captureModes: [(key: String, label: String)] = [
-        ("clip", "Auto-Clip (Ringpuffer)"),
-        ("video", "Durchgehendes Video"),
+        ("video", "Video (Ringpuffer-Clips)"),
         ("slowMotion", "Zeitlupe (hohe Bildrate)"),
         ("photo", "Serienfotos"),
     ]

@@ -7,6 +7,7 @@
 //
 
 import AVFoundation
+import AVKit
 import SwiftUI
 import UIKit
 
@@ -15,13 +16,17 @@ struct CameraView: View {
     @State private var plug = PlugLink.shared
     @State private var controller = ArcController.shared
 
-    @AppStorage("captureMode") private var modeKey = CaptureMode.slowMotion.rawValue
+    @AppStorage("captureMode") private var modeKey = CaptureMode.video.rawValue
     @AppStorage("triggerBrightness") private var triggerBrightness = true
     @AppStorage("triggerCurrent") private var triggerCurrent = true
     @AppStorage("triggerAudio") private var triggerAudio = false
     @AppStorage("triggerAuto") private var triggerAuto = false
 
-    private var mode: CaptureMode { CaptureMode(rawValue: modeKey) ?? .slowMotion }
+    @State private var showPreview = false
+
+    // Fallback .video fängt auch den alten Einstellungs-Wert „clip" ab —
+    // der frühere Fallback auf Zeitlupe hat den Foto-Modus unerreichbar gemacht.
+    private var mode: CaptureMode { CaptureMode(rawValue: modeKey) ?? .video }
 
     var body: some View {
         ZStack {
@@ -176,7 +181,19 @@ struct CameraView: View {
             .pickerStyle(.segmented)
 
             HStack {
-                if let name = engine.lastSavedName {
+                if engine.lastClipURL != nil || engine.lastPhoto != nil {
+                    Button {
+                        Haptics.light()
+                        showPreview = true
+                    } label: {
+                        Label(engine.lastSavedName ?? "Letzte Aufnahme",
+                              systemImage: "play.rectangle.fill")
+                            .font(.caption2)
+                            .lineLimit(1)
+                    }
+                    .foregroundStyle(Palette.ok)
+                    .accessibilityLabel("Letzte Aufnahme ansehen")
+                } else if let name = engine.lastSavedName {
                     Label(name, systemImage: "checkmark.circle.fill")
                         .font(.caption2)
                         .foregroundStyle(Palette.ok)
@@ -190,6 +207,9 @@ struct CameraView: View {
                         .font(.caption2)
                         .foregroundStyle(.secondary)
                 }
+            }
+            .sheet(isPresented: $showPreview) {
+                LastCaptureSheet(url: engine.lastClipURL, photo: engine.lastPhoto)
             }
 
             if let error = engine.lastError {
@@ -231,6 +251,33 @@ struct CameraView: View {
     private func valueText(_ value: Double?, unit: String, digits: Int) -> String {
         guard let v = value else { return "— \(unit)" }
         return String(format: "%.\(digits)f %@", v, unit)
+    }
+}
+
+// MARK: - Vorschau der letzten Aufnahme
+
+private struct LastCaptureSheet: View {
+    let url: URL?
+    let photo: UIImage?
+
+    var body: some View {
+        NavigationStack {
+            Group {
+                if let url {
+                    VideoPlayer(player: AVPlayer(url: url))
+                        .ignoresSafeArea(edges: .bottom)
+                } else if let photo {
+                    Image(uiImage: photo)
+                        .resizable()
+                        .scaledToFit()
+                } else {
+                    ContentUnavailableView("Noch keine Aufnahme", systemImage: "camera")
+                }
+            }
+            .navigationTitle("Letzte Aufnahme")
+            .navigationBarTitleDisplayMode(.inline)
+        }
+        .presentationDetents([.large])
     }
 }
 
