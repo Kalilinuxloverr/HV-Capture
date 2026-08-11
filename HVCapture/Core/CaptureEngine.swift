@@ -105,22 +105,21 @@ final class CaptureEngine: NSObject {
     private let queue = DispatchQueue(label: "dev.leonfrohlich.hvcapture.capture")
 
     private var device: AVCaptureDevice?
-    private var writer: AVAssetWriter?
-    private var videoInput: AVAssetWriterInput?
-    private var audioInput: AVAssetWriterInput?
-    private var writeStart: CMTime?
-    private var writeUntil: CMTime?
-    private var outputURL: URL?
-
-    private var ring: [(buffer: CMSampleBuffer, isVideo: Bool)] = []
-    private var lumaAverage: Double?
-    private var audioAverage: Double?
     private var lastTriggerAt: Date?
     private var lastWatts: Double?
     private var nominalFPS: Double = 30
-    /// Streckfaktor der Zeitstempel: bei 240 fps wird der Clip achtfach
-    /// gestreckt, sodass er direkt in Zeitlupe abspielt.
-    private var slowMotionFactor: Double = 1
+
+    /// Zustand, der ausschliesslich auf der Capture-Queue lebt: der Segment-Ring
+    /// und die Auslöser-Analyse. `ring` wird einmalig in configure() gesetzt,
+    /// bevor die Session läuft.
+    private final class QueueState: @unchecked Sendable {
+        var ring: SegmentRing?
+        var lumaAverage: Double?
+        var audioAverage: Double?
+        var videoFrameCount = 0
+        var audioFrameCount = 0
+    }
+    private let q = QueueState()
 
     private override init() { super.init() }
 
@@ -128,8 +127,11 @@ final class CaptureEngine: NSObject {
 
     var mode: CaptureMode {
         get {
+            // „clip" (Auto-Clip aus den Einstellungen) heisst normale Bildrate
+            // mit Ringpuffer-Auslösern — NICHT Zeitlupe. Der alte Fallback auf
+            // .slowMotion hat die Kamera ungefragt auf 240 fps gestellt.
             CaptureMode(rawValue: UserDefaults.standard.string(forKey: "captureMode") ?? "")
-                ?? .slowMotion
+                ?? .video
         }
         set { UserDefaults.standard.set(newValue.rawValue, forKey: "captureMode") }
     }
@@ -211,6 +213,25 @@ final class CaptureEngine: NSObject {
         if (UserDefaults.standard.object(forKey: "manualExposure") as? Bool) ?? true {
             applyArcPreset()
         }
+
+        let r = SegmentRing(queue: queue)
+        r.ringSeconds = ringSeconds
+        r.slowFactor = mode == .slowMotion ? Swift.max(1, nominalFPS / CaptureDefaults.slowMotionPlaybackFPS) : 1
+        r.onBuffered = { [weak self] seconds in
+            Task { @MainActor in self?.bufferedSeconds = seconds }
+        }
+        r.onFinished = { [weak self] url in
+            Task { @MainActor in
+                guard let self else { return }
+                if let url {
+                    await self.saveVideo(url)
+                } else {
+                    self.lastError = "Clip konnte nicht zusammengesetzt werden."
+                }
+                self.isRecording = false
+            }
+        }
+        q.ring = r
         isConfigured = true
     }
 
@@ -290,7 +311,7 @@ final class CaptureEngine: NSObject {
     // MARK: Auslöser
 
     func trigger(_ source: TriggerSource) {
-        guard isEnabled(source) else { return }
+        guard isEnabled(source), isRunning, !isRecording else { return }
         let now = Date()
         if let last = lastTriggerAt, now.timeIntervalSince(last) < CaptureDefaults.triggerCooldown {
             return
@@ -298,15 +319,21 @@ final class CaptureEngine: NSObject {
         lastTriggerAt = now
         lastTrigger = source
         Haptics.light()
-        saveBuffered(preRoll: ringSeconds, postRoll: postRoll)
+        isRecording = true
+        let post = postRoll
+        let r = q.ring
+        queue.async { r?.beginClip(postRollSeconds: post) }
     }
 
     /// Wird vom Messwertstrom gefüttert; ein deutlicher Leistungssprung löst aus.
+    /// Der Sprungfaktor kommt aus dem Auslöser-Lernen (TriggerTuning) über die
+    /// bisherigen Sessions; ohne Lernstand gilt 1,6.
     func externalPowerSignal(watts: Double?) {
         guard let w = watts else { lastWatts = nil; return }
         defer { lastWatts = w }
         guard let previous = lastWatts, previous > 1 else { return }
-        if w > previous * 1.6 { trigger(.current) }
+        let factor = UserDefaults.standard.object(forKey: TriggerTuning.storageKey) as? Double ?? 1.6
+        if w > previous * factor { trigger(.current) }
     }
 
     // MARK: Aufnahme
@@ -316,135 +343,19 @@ final class CaptureEngine: NSObject {
         photoOutput.capturePhoto(with: AVCapturePhotoSettings(), delegate: self)
     }
 
+    /// Durchgehende Aufnahme: der Ring wächst, bis `stopRecording()` den Clip
+    /// schliesst — der Vorlauf aus dem Puffer ist automatisch enthalten.
     func startRecording() {
-        guard !isRecording else { return }
-        saveBuffered(preRoll: ringSeconds, postRoll: .infinity)
+        guard isRunning, !isRecording else { return }
+        isRecording = true
+        let r = q.ring
+        queue.async { r?.beginContinuous() }
     }
 
     func stopRecording() {
-        finishWriting()
-    }
-
-    /// Sichert Vorlauf aus dem Ringpuffer plus die kommenden `postRoll`
-    /// Sekunden. `postRoll == .infinity` läuft bis `stopRecording()`.
-    func saveBuffered(preRoll: Double, postRoll: Double, tag: String = "arc") {
-        guard isRunning, !isRecording else { return }
-        isRecording = true
-        beginWriting(preRoll: preRoll, postRoll: postRoll, tag: tag)
-    }
-
-    // MARK: Schreiben
-
-    private func beginWriting(preRoll: Double, postRoll: Double, tag: String) {
-        let url = FileManager.default.temporaryDirectory
-            .appendingPathComponent("hv-\(tag)-\(Int(Date().timeIntervalSince1970)).mov")
-        guard let w = try? AVAssetWriter(outputURL: url, fileType: .mov) else {
-            lastError = "Aufnahme konnte nicht gestartet werden."
-            isRecording = false
-            return
-        }
-
-        let vIn = AVAssetWriterInput(mediaType: .video, outputSettings: [
-            AVVideoCodecKey: AVVideoCodecType.h264,
-            AVVideoWidthKey: 1920,
-            AVVideoHeightKey: 1080,
-        ])
-        vIn.expectsMediaDataInRealTime = true
-        if w.canAdd(vIn) { w.add(vIn) }
-
-        let aIn = AVAssetWriterInput(mediaType: .audio, outputSettings: [
-            AVFormatIDKey: kAudioFormatMPEG4AAC,
-            AVNumberOfChannelsKey: 1,
-            AVSampleRateKey: 44100,
-        ])
-        aIn.expectsMediaDataInRealTime = true
-        if w.canAdd(aIn) { w.add(aIn) }
-
-        slowMotionFactor = mode == .slowMotion
-            ? Swift.max(1, nominalFPS / CaptureDefaults.slowMotionPlaybackFPS)
-            : 1
-
-        // Vorlauf: nur die Buffer aus dem Ringpuffer, die jung genug sind.
-        let newest = ring.last.map { CMSampleBufferGetPresentationTimeStamp($0.buffer) }
-        let preRollStart = newest.map { $0 - CMTime(seconds: preRoll, preferredTimescale: 600) }
-        let preRollBuffers = ring.filter { entry in
-            guard let s = preRollStart else { return false }
-            return CMSampleBufferGetPresentationTimeStamp(entry.buffer) >= s
-        }
-
-        guard let first = preRollBuffers.first?.buffer ?? ring.last?.buffer else {
-            isRecording = false
-            return
-        }
-        let start = CMSampleBufferGetPresentationTimeStamp(first)
-        w.startWriting()
-        w.startSession(atSourceTime: start)
-
-        writer = w
-        videoInput = vIn
-        audioInput = aIn
-        outputURL = url
-        writeStart = start
-        writeUntil = postRoll.isInfinite
-            ? nil
-            : start + CMTime(seconds: preRoll + postRoll, preferredTimescale: 600)
-
-        for entry in preRollBuffers { append(entry.buffer, isVideo: entry.isVideo) }
-    }
-
-    private func append(_ buffer: CMSampleBuffer, isVideo: Bool) {
-        guard let w = writer, w.status == .writing, let start = writeStart else { return }
-        let pts = CMSampleBufferGetPresentationTimeStamp(buffer)
-
-        if let until = writeUntil, pts > until {
-            finishWriting()
-            return
-        }
-
-        // Zeitlupe: Ton weglassen — bei gestreckten Zeitstempeln wäre er unbrauchbar.
-        if slowMotionFactor > 1, !isVideo { return }
-
-        guard let input = isVideo ? videoInput : audioInput,
-              input.isReadyForMoreMediaData else { return }
-
-        guard slowMotionFactor > 1, isVideo else {
-            input.append(buffer)
-            return
-        }
-
-        let offset = CMTimeMultiplyByFloat64(pts - start, multiplier: slowMotionFactor)
-        var timing = CMSampleTimingInfo(
-            duration: CMTimeMultiplyByFloat64(CMSampleBufferGetDuration(buffer),
-                                              multiplier: slowMotionFactor),
-            presentationTimeStamp: start + offset,
-            decodeTimeStamp: .invalid)
-        var retimed: CMSampleBuffer?
-        CMSampleBufferCreateCopyWithNewTiming(allocator: kCFAllocatorDefault,
-                                              sampleBuffer: buffer,
-                                              sampleTimingEntryCount: 1,
-                                              sampleTimingArray: &timing,
-                                              sampleBufferOut: &retimed)
-        if let retimed { input.append(retimed) }
-    }
-
-    private func finishWriting() {
-        guard let w = writer, w.status == .writing else { return }
-        videoInput?.markAsFinished()
-        audioInput?.markAsFinished()
-        let url = outputURL
-        writer = nil
-        videoInput = nil
-        audioInput = nil
-        writeStart = nil
-        writeUntil = nil
-        outputURL = nil
-
-        w.finishWriting {
-            Task { @MainActor [weak self] in
-                self?.isRecording = false
-                if let url { await self?.saveVideo(url) }
-            }
-        }
+        guard isRecording else { return }
+        let r = q.ring
+        queue.async { r?.endContinuous() }
     }
 
     // MARK: Mediathek
@@ -585,28 +496,19 @@ extension CaptureEngine: AVCaptureVideoDataOutputSampleBufferDelegate,
     nonisolated func captureOutput(_ output: AVCaptureOutput,
                                    didOutput sampleBuffer: CMSampleBuffer,
                                    from connection: AVCaptureConnection) {
+        // Läuft direkt auf der Capture-Queue. Der Buffer wird sofort ins
+        // laufende Segment geschrieben und dem Treiber zurückgegeben — nie
+        // aufbewahrt. Der alte Ringpuffer hat rohe Buffer sekundenlang
+        // gehalten; deren Pool ist klein, und war er leer, lieferte die Kamera
+        // keine Bilder mehr (Standbild + tote Auslöser, Feldtest 11.08.).
         let isVideo = output is AVCaptureVideoDataOutput
-        Task { @MainActor [weak self] in
-            self?.ingest(sampleBuffer, isVideo: isVideo)
-        }
-    }
-
-    private func ingest(_ buffer: CMSampleBuffer, isVideo: Bool) {
-        ring.append((buffer, isVideo))
-        let now = CMSampleBufferGetPresentationTimeStamp(buffer)
-        let cutoff = now - CMTime(seconds: ringSeconds, preferredTimescale: 600)
-        ring.removeAll { CMSampleBufferGetPresentationTimeStamp($0.buffer) < cutoff }
-        if let first = ring.first?.buffer {
-            bufferedSeconds = CMTimeGetSeconds(now - CMSampleBufferGetPresentationTimeStamp(first))
-        }
-
-        if writer != nil { append(buffer, isVideo: isVideo) }
-        if isVideo { analyseLuma(buffer) } else { analyseAudio(buffer) }
+        q.ring?.ingest(sampleBuffer, isVideo: isVideo)
+        if isVideo { analyseLuma(sampleBuffer) } else { analyseAudio(sampleBuffer) }
     }
 
     /// Mittlere Helligkeit aus der Luma-Ebene, jede 8. Zeile und Spalte —
     /// jedes Pixel zu lesen kostet bei 240 fps mehr, als die Genauigkeit wert ist.
-    private func analyseLuma(_ buffer: CMSampleBuffer) {
+    nonisolated private func analyseLuma(_ buffer: CMSampleBuffer) {
         guard let px = CMSampleBufferGetImageBuffer(buffer) else { return }
         CVPixelBufferLockBaseAddress(px, .readOnly)
         defer { CVPixelBufferUnlockBaseAddress(px, .readOnly) }
@@ -626,16 +528,24 @@ extension CaptureEngine: AVCaptureVideoDataOutputSampleBufferDelegate,
         }
         guard count > 0 else { return }
         let luma = Double(sum) / Double(count) / 255
-        currentLuma = luma
 
-        guard let avg = lumaAverage else { lumaAverage = luma; return }
+        // Publizieren gedrosselt — pro Frame auf den MainActor zu springen
+        // würde SwiftUI bei 240 fps ersticken.
+        q.videoFrameCount += 1
+        if q.videoFrameCount % 6 == 0 {
+            Task { @MainActor [weak self] in self?.currentLuma = luma }
+        }
+
+        guard let avg = q.lumaAverage else { q.lumaAverage = luma; return }
         let delta = UserDefaults.standard.object(forKey: "brightnessDelta") as? Double
             ?? CaptureDefaults.brightnessDelta
-        if luma - avg > delta { trigger(.brightness) }
-        lumaAverage = avg * 0.9 + luma * 0.1
+        if luma - avg > delta {
+            Task { @MainActor [weak self] in self?.trigger(.brightness) }
+        }
+        q.lumaAverage = avg * 0.9 + luma * 0.1
     }
 
-    private func analyseAudio(_ buffer: CMSampleBuffer) {
+    nonisolated private func analyseAudio(_ buffer: CMSampleBuffer) {
         guard let block = CMSampleBufferGetDataBuffer(buffer) else { return }
         var length = 0
         var pointer: UnsafeMutablePointer<Int8>?
@@ -654,12 +564,12 @@ extension CaptureEngine: AVCaptureVideoDataOutputSampleBufferDelegate,
 
         var rms: Float = 0
         vDSP_rmsqv(floats, 1, &rms, vDSP_Length(count))
-        audioLevel = Double(rms)
+        let level = Double(rms)
 
         // Grobes 16-Band-Spektrum: mittlerer Betrag je Block, reicht für die Anzeige.
         let bands = 16
         let per = Swift.max(1, count / bands)
-        spectrum = (0..<bands).map { b in
+        let newSpectrum = (0..<bands).map { b -> Double in
             let lo = b * per, hi = Swift.min(lo + per, count)
             guard lo < hi else { return 0 }
             var m: Float = 0
@@ -669,12 +579,21 @@ extension CaptureEngine: AVCaptureVideoDataOutputSampleBufferDelegate,
             return Swift.min(1, Double(m) * 8)
         }
 
-        let level = Double(rms)
-        guard let avg = audioAverage else { audioAverage = level; return }
+        q.audioFrameCount += 1
+        if q.audioFrameCount % 4 == 0 {
+            Task { @MainActor [weak self] in
+                self?.audioLevel = level
+                self?.spectrum = newSpectrum
+            }
+        }
+
+        guard let avg = q.audioAverage else { q.audioAverage = level; return }
         let delta = UserDefaults.standard.object(forKey: "audioDelta") as? Double
             ?? CaptureDefaults.audioDelta
-        if level - avg > delta { trigger(.audio) }
-        audioAverage = avg * 0.9 + level * 0.1
+        if level - avg > delta {
+            Task { @MainActor [weak self] in self?.trigger(.audio) }
+        }
+        q.audioAverage = avg * 0.9 + level * 0.1
     }
 }
 
@@ -684,6 +603,207 @@ extension CaptureEngine: AVCapturePhotoCaptureDelegate {
                                  error: Error?) {
         guard error == nil, let data = photo.fileDataRepresentation() else { return }
         Task { @MainActor [weak self] in await self?.savePhoto(data) }
+    }
+}
+
+// MARK: - Segment-Ring
+
+/// Ringpuffer aus fertig kodierten ~1-s-Segmentdateien statt roher Kamerabuffer.
+///
+/// AVCaptureVideoDataOutput vergibt seine Buffer aus einem kleinen festen Pool.
+/// Wer sie sekundenlang aufhebt (der alte Ringpuffer), leert den Pool — die
+/// Kamera liefert dann keine Bilder mehr: eingefrorener Sucher, tote Auslöser.
+/// Hier wird jedes Bild sofort ins laufende H.264-Segment geschrieben und der
+/// Buffer zurückgegeben; der Ring besteht aus abgeschlossenen Dateien. Ein
+/// Auslöser sammelt die behaltenen Segmente plus Nachlauf ein und setzt sie
+/// ohne Neukodierung zu einem Clip zusammen; Zeitlupe streckt dabei nur die
+/// Zeitachse (scaleTimeRange), ebenfalls ohne Neukodierung.
+///
+/// Alle Methoden laufen auf der Capture-Queue — darauf stützt sich das
+/// @unchecked Sendable: der Zustand ist queue-confined, nicht gelockt.
+final class SegmentRing: @unchecked Sendable {
+    var ringSeconds: Double = 5
+    var slowFactor: Double = 1
+    /// Nach jeder Segment-Rotation (~1 Hz): gepufferte Sekunden.
+    var onBuffered: ((Double) -> Void)?
+    /// Fertiger Clip; nil = nichts zu sichern oder Zusammensetzen fehlgeschlagen.
+    var onFinished: ((URL?) -> Void)?
+
+    private let queue: DispatchQueue
+    private let segmentSeconds = 1.0
+    private var writer: AVAssetWriter?
+    private var videoIn: AVAssetWriterInput?
+    private var audioIn: AVAssetWriterInput?
+    private var segmentStart: CMTime?
+    private var lastPTS: CMTime = .invalid
+    private var done: [(url: URL, seconds: Double)] = []
+    private var clipEnd: CMTime?
+    private var continuous = false
+
+    init(queue: DispatchQueue) {
+        self.queue = queue
+    }
+
+    func ingest(_ buffer: CMSampleBuffer, isVideo: Bool) {
+        let pts = CMSampleBufferGetPresentationTimeStamp(buffer)
+        lastPTS = pts
+
+        if writer == nil {
+            guard isVideo else { return }        // Segmente beginnen mit einem Videobild
+            startSegment(at: pts)
+        }
+        if isVideo, let end = clipEnd, pts >= end {
+            finishClip()
+            return
+        }
+        if isVideo, let start = segmentStart,
+           CMTimeGetSeconds(pts - start) >= segmentSeconds {
+            closeSegment()                        // rotieren …
+            startSegment(at: pts)                 // … und nahtlos weiter
+        }
+        guard let w = writer, w.status == .writing,
+              let input = isVideo ? videoIn : audioIn,
+              input.isReadyForMoreMediaData else { return }
+        input.append(buffer)
+    }
+
+    /// Auslöser: behaltene Segmente + `postRollSeconds` Nachlauf werden ein Clip.
+    func beginClip(postRollSeconds: Double) {
+        guard clipEnd == nil, !continuous else { return }
+        guard lastPTS.isValid else { onFinished?(nil); return }
+        clipEnd = lastPTS + CMTime(seconds: postRollSeconds, preferredTimescale: 600)
+    }
+
+    /// Durchgehende Aufnahme: Pruning stoppt, der Ring wächst bis `endContinuous()`.
+    func beginContinuous() {
+        guard !continuous, clipEnd == nil else { return }
+        continuous = true
+    }
+
+    func endContinuous() {
+        guard continuous else { return }
+        continuous = false
+        finishClip()
+    }
+
+    // MARK: Segmente
+
+    private func startSegment(at pts: CMTime) {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("hv-seg-\(UUID().uuidString).mov")
+        guard let w = try? AVAssetWriter(outputURL: url, fileType: .mov) else { return }
+        let vIn = AVAssetWriterInput(mediaType: .video, outputSettings: [
+            AVVideoCodecKey: AVVideoCodecType.h264,
+            AVVideoWidthKey: 1920,
+            AVVideoHeightKey: 1080,
+        ])
+        vIn.expectsMediaDataInRealTime = true
+        if w.canAdd(vIn) { w.add(vIn) }
+        let aIn = AVAssetWriterInput(mediaType: .audio, outputSettings: [
+            AVFormatIDKey: kAudioFormatMPEG4AAC,
+            AVNumberOfChannelsKey: 1,
+            AVSampleRateKey: 44100,
+        ])
+        aIn.expectsMediaDataInRealTime = true
+        if w.canAdd(aIn) { w.add(aIn) }
+        w.startWriting()
+        w.startSession(atSourceTime: pts)
+        writer = w
+        videoIn = vIn
+        audioIn = aIn
+        segmentStart = pts
+    }
+
+    /// Schliesst das laufende Segment; `then` läuft danach wieder auf der Queue.
+    private func closeSegment(then completion: (() -> Void)? = nil) {
+        guard let w = writer, let start = segmentStart else { completion?(); return }
+        let seconds = lastPTS.isValid ? CMTimeGetSeconds(lastPTS - start) : 0
+        let url = w.outputURL
+        videoIn?.markAsFinished()
+        audioIn?.markAsFinished()
+        writer = nil
+        videoIn = nil
+        audioIn = nil
+        segmentStart = nil
+        w.finishWriting { [self] in
+            queue.async {
+                // Rotation ist 1/s, finishWriting braucht Millisekunden —
+                // die Reihenfolge in `done` bleibt dadurch chronologisch.
+                if w.status == .completed { self.done.append((url, seconds)) }
+                self.prune()
+                self.onBuffered?(self.done.reduce(0) { $0 + $1.seconds })
+                completion?()
+            }
+        }
+    }
+
+    private func prune() {
+        guard clipEnd == nil, !continuous else { return }
+        var total = done.reduce(0) { $0 + $1.seconds }
+        while total > ringSeconds, done.count > 1 {
+            let old = done.removeFirst()
+            total -= old.seconds
+            try? FileManager.default.removeItem(at: old.url)
+        }
+    }
+
+    private func finishClip() {
+        clipEnd = nil
+        let factor = slowFactor
+        closeSegment { [self] in
+            let parts = done
+            done = []
+            onBuffered?(0)
+            guard !parts.isEmpty else { onFinished?(nil); return }
+            let finish = onFinished
+            Task.detached(priority: .userInitiated) {
+                let url = await SegmentRing.assemble(parts.map(\.url), slowFactor: factor)
+                for part in parts { try? FileManager.default.removeItem(at: part.url) }
+                finish?(url)
+            }
+        }
+    }
+
+    /// Segmente ohne Neukodierung aneinanderhängen. Zeitlupe streckt die
+    /// Zeitachse; der Ton entfällt dann — gestreckt wäre er unbrauchbar.
+    private static func assemble(_ parts: [URL], slowFactor: Double) async -> URL? {
+        let comp = AVMutableComposition()
+        guard let vDst = comp.addMutableTrack(withMediaType: .video,
+                                              preferredTrackID: kCMPersistentTrackID_Invalid)
+        else { return nil }
+        let aDst = slowFactor > 1 ? nil
+            : comp.addMutableTrack(withMediaType: .audio,
+                                   preferredTrackID: kCMPersistentTrackID_Invalid)
+        var cursor = CMTime.zero
+        for url in parts {
+            let asset = AVURLAsset(url: url)
+            guard let duration = try? await asset.load(.duration),
+                  duration.seconds > 0,
+                  let video = try? await asset.loadTracks(withMediaType: .video).first
+            else { continue }
+            let range = CMTimeRange(start: .zero, duration: duration)
+            guard (try? vDst.insertTimeRange(range, of: video, at: cursor)) != nil else { continue }
+            if let aDst, let audio = try? await asset.loadTracks(withMediaType: .audio).first {
+                try? aDst.insertTimeRange(range, of: audio, at: cursor)
+            }
+            cursor = cursor + duration
+        }
+        guard cursor.seconds > 0 else { return nil }
+        if slowFactor > 1 {
+            comp.scaleTimeRange(CMTimeRange(start: .zero, duration: cursor),
+                                toDuration: CMTimeMultiplyByFloat64(cursor, multiplier: slowFactor))
+        }
+        let out = FileManager.default.temporaryDirectory
+            .appendingPathComponent("hv-arc-\(Int(Date().timeIntervalSince1970)).mov")
+        guard let export = AVAssetExportSession(asset: comp,
+                                                presetName: AVAssetExportPresetPassthrough)
+        else { return nil }
+        do {
+            try await export.export(to: out, as: .mov)
+            return out
+        } catch {
+            return nil
+        }
     }
 }
 

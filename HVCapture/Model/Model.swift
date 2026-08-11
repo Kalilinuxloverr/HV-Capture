@@ -324,3 +324,48 @@ struct GuardConfig: Codable, Equatable {
         return out
     }
 }
+
+// MARK: - Auslöser-Lernen
+
+/// Lernt den Sprungfaktor des Strom-Auslösers aus den bisherigen Sessions:
+/// Ruhelast = Median der Messwerte ausserhalb der Bögen, Bogenlast = Median der
+/// Bogen-Spitzen. Der Faktor liegt geometrisch dazwischen — hoch genug, dass
+/// die Ruhelast (Vorlast, Lüfter) nicht auslöst, niedrig genug, dass jeder
+/// echte Bogen ihn reisst. Unter 3 Sessions mit Bögen wird nichts gelernt und
+/// der Standard von 1,6 bleibt.
+enum TriggerTuning {
+    static let storageKey = "currentJumpFactor"
+
+    static func jumpFactor(from sessions: [Session]) -> Double? {
+        let usable = sessions.filter { !$0.arcs.isEmpty && !$0.samples.isEmpty }
+        guard usable.count >= 3 else { return nil }
+
+        var idle: [Double] = []
+        var arc: [Double] = []
+        for session in usable {
+            let ranges = session.arcs.compactMap { a in a.end.map { (a.start, $0) } }
+            for sample in session.samples where sample.w > 0 {
+                let inArc = ranges.contains { sample.t >= $0.0 && sample.t <= $0.1 }
+                if !inArc { idle.append(sample.w) }
+            }
+            arc.append(contentsOf: session.arcs.map(\.peakWatts).filter { $0 > 0 })
+        }
+        guard let idleMedian = median(idle), idleMedian > 1,
+              let arcMedian = median(arc), arcMedian > idleMedian else { return nil }
+
+        // Geometrische Mitte als Faktor relativ zur Ruhelast, begrenzt auf
+        // einen Bereich, in dem der Auslöser weder taub noch schreckhaft wird.
+        let factor = (arcMedian / idleMedian).squareRoot()
+        return Swift.min(4.0, Swift.max(1.3, factor))
+    }
+
+    static func learn(from sessions: [Session], into defaults: UserDefaults = .standard) {
+        guard let factor = jumpFactor(from: sessions) else { return }
+        defaults.set(factor, forKey: storageKey)
+    }
+
+    private static func median(_ values: [Double]) -> Double? {
+        guard !values.isEmpty else { return nil }
+        return values.sorted()[values.count / 2]
+    }
+}

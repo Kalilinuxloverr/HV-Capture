@@ -162,6 +162,7 @@ final class SessionStore {
             }
         }
         sessions = found.sorted { $0.started > $1.started }
+        TriggerTuning.learn(from: sessions)
     }
 
     func save(_ session: Session) {
@@ -173,6 +174,8 @@ final class SessionStore {
             sessions.removeAll { $0.id == session.id }
             sessions.append(session)
             sessions.sort { $0.started > $1.started }
+            // Jede neue Session verfeinert den gelernten Strom-Auslöser.
+            TriggerTuning.learn(from: sessions)
         } catch {
             loadErrors.append("Speichern fehlgeschlagen: \(error.localizedDescription)")
         }

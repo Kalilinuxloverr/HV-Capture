@@ -493,3 +493,37 @@ struct EnergyCostTests {
         #expect(Awattar.parse(Data(#"{"data":"nope"}"#.utf8)).isEmpty)
     }
 }
+
+// MARK: - Auslöser-Lernen
+
+@Suite("TriggerTuning")
+struct TriggerTuningTests {
+    private func session(idleW: Double, peakW: Double) -> Session {
+        var s = Session(started: Date(timeIntervalSince1970: 1_770_000_000))
+        s.samples = (0..<10).map { Sample(t: Double($0), v: 230, a: 1, w: idleW) }
+            + [Sample(t: 20, v: 230, a: 10, w: peakW)]
+        s.arcs = [ArcEvent(start: 19.5, end: 20.5, peakWatts: peakW, peakAmps: 10)]
+        return s
+    }
+
+    @Test("Faktor liegt geometrisch zwischen Ruhe- und Bogenlast")
+    func learns() throws {
+        let all = [session(idleW: 200, peakW: 2600),
+                   session(idleW: 190, peakW: 3000),
+                   session(idleW: 210, peakW: 2400)]
+        let f = try #require(TriggerTuning.jumpFactor(from: all))
+        #expect(f > 3.0 && f <= 4.0)   // sqrt(2600/200) ≈ 3,6
+    }
+
+    @Test("Unter 3 Sessions mit Bögen wird nichts gelernt")
+    func needsData() {
+        #expect(TriggerTuning.jumpFactor(from: [session(idleW: 200, peakW: 2600)]) == nil)
+        #expect(TriggerTuning.jumpFactor(from: []) == nil)
+    }
+
+    @Test("Ohne echten Sprung zwischen Ruhe und Bogen kein Lernwert")
+    func flatData() {
+        let all = (0..<3).map { _ in session(idleW: 2000, peakW: 2000) }
+        #expect(TriggerTuning.jumpFactor(from: all) == nil)
+    }
+}

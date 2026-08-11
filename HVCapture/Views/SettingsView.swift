@@ -85,6 +85,7 @@ struct SettingsView: View {
     private let captureModes: [(key: String, label: String)] = [
         ("clip", "Auto-Clip (Ringpuffer)"),
         ("video", "Durchgehendes Video"),
+        ("slowMotion", "Zeitlupe (hohe Bildrate)"),
         ("photo", "Serienfotos"),
     ]
 
