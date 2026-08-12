@@ -76,9 +76,6 @@ targets:
     platform: watchOS
     sources:
       - Watch
-    dependencies:
-      - target: HVCaptureWatchComplication
-        embed: true
     info:
       path: Watch/Info.plist
       properties:
@@ -91,21 +88,6 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: dev.leonfrohlich.hvcapture.watchkitapp
         INFOPLIST_KEY_UIUserInterfaceStyle: Dark
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
-
-  HVCaptureWatchComplication:
-    type: app-extension
-    platform: watchOS
-    sources:
-      - WatchComplication
-    info:
-      path: WatchComplication/Info.plist
-      properties:
-        CFBundleDisplayName: HV-Capture
-        NSExtension:
-          NSExtensionPointIdentifier: com.apple.widgetkit-extension
-    settings:
-      base:
-        PRODUCT_BUNDLE_IDENTIFIER: dev.leonfrohlich.hvcapture.watchkitapp.complication
 
   HVCaptureTests:
     type: bundle.unit-test

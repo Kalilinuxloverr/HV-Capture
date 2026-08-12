@@ -24,7 +24,7 @@ enum SessionReport {
             .appendingPathComponent("\(SessionStore.baseName(for: session)).pdf")
 
         var success = false
-        renderer.render { size, renderInContext in
+        renderer.render { _, renderInContext in
             var box = CGRect(origin: .zero, size: pageSize)
             guard let ctx = CGContext(url as CFURL, mediaBox: &box, nil) else { return }
             ctx.beginPDFPage(nil)
