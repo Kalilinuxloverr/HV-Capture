@@ -85,6 +85,8 @@ private enum CaptureDefaults {
     /// Sperrzeit nach einem Auslöser — ein Ereignis soll einmal gesichert
     /// werden, nicht zehnmal.
     static let triggerCooldown = 1.5
+    /// Abstand zwischen den Bildern einer Foto-Serie.
+    static let burstDelay = 0.15
     /// Zeitlupe wird geschrieben, als wären es 30 fps.
     static let slowMotionPlaybackFPS = 30.0
     static let maxZoom = 8.0
@@ -189,6 +191,17 @@ final class CaptureEngine: NSObject {
         UserDefaults.standard.string(forKey: "videoQuality") == "4k"
     }
 
+    /// Fotos je Auslösung (1 = Einzelbild).
+    private var burstCount: Int {
+        let v = UserDefaults.standard.object(forKey: "burstCount") as? Int ?? 3
+        return Swift.min(Swift.max(v, 1), 10)
+    }
+
+    /// Aufnahmen zusätzlich in die Fotomediathek legen (Album „HV-Capture").
+    private var photosExportEnabled: Bool {
+        UserDefaults.standard.object(forKey: "photosExportEnabled") as? Bool ?? true
+    }
+
     private var autoAll: Bool { UserDefaults.standard.bool(forKey: "triggerAuto") }
 
     func isEnabled(_ source: TriggerSource) -> Bool {
@@ -290,6 +303,7 @@ final class CaptureEngine: NSObject {
             let r = SegmentRing(queue: queue)
             r.ringSeconds = ringSeconds
             r.rotationAngle = rotationAngle
+            r.nominalFPS = nominalFPS
             r.slowFactor = m == .slowMotion
                 ? Swift.max(1, nominalFPS / CaptureDefaults.slowMotionPlaybackFPS) : 1
             r.onBuffered = { [weak self] seconds in
@@ -548,9 +562,21 @@ final class CaptureEngine: NSObject {
 
     func capturePhoto() {
         guard isRunning, session.outputs.contains(photoOutput) else { return }
-        let settings = AVCapturePhotoSettings()
-        settings.photoQualityPrioritization = .quality
-        photoOutput.capturePhoto(with: settings, delegate: self)
+        let count = burstCount
+        // Serie: mehrere schnelle Aufnahmen statt einem Einzelbild — bei einem
+        // zuckenden Bogen ist der beste Frame sonst reine Glückssache. Bei der
+        // Serie zählt Tempo, beim Einzelbild Qualität.
+        for i in 0..<count {
+            Task { [weak self] in
+                if i > 0 {
+                    try? await Task.sleep(for: .seconds(Double(i) * CaptureDefaults.burstDelay))
+                }
+                guard let self, self.isRunning else { return }
+                let settings = AVCapturePhotoSettings()
+                settings.photoQualityPrioritization = count > 1 ? .speed : .quality
+                self.photoOutput.capturePhoto(with: settings, delegate: self)
+            }
+        }
     }
 
     func startRecording() {
@@ -604,7 +630,7 @@ final class CaptureEngine: NSObject {
         lastSavedName = stored.lastPathComponent
         SessionRecorder.shared.addMedia(stored.lastPathComponent)
 
-        guard await ensurePhotoAccess() else { return }
+        guard photosExportEnabled, await ensurePhotoAccess() else { return }
         do {
             let album = try? await Self.album()
             try await PHPhotoLibrary.shared().performChanges {
@@ -628,7 +654,7 @@ final class CaptureEngine: NSObject {
         lastSavedName = name
         SessionRecorder.shared.addMedia(name)
 
-        guard await ensurePhotoAccess() else { return }
+        guard photosExportEnabled, await ensurePhotoAccess() else { return }
         do {
             let album = try? await Self.album()
             try await PHPhotoLibrary.shared().performChanges {
@@ -903,6 +929,8 @@ extension CaptureEngine: AVCapturePhotoCaptureDelegate {
 final class SegmentRing: @unchecked Sendable {
     var ringSeconds: Double = 5
     var slowFactor: Double = 1
+    /// Bildrate der Quelle — bestimmt die Ziel-Bitrate der Segmente.
+    var nominalFPS: Double = 30
     /// Rotations-Metadatum in Grad (90 = Hochformat) — ohne das spielt jeder
     /// Player die Segmente quer ab, weil die Kamera liegend liefert.
     var rotationAngle: Double = 90
@@ -984,10 +1012,20 @@ final class SegmentRing: @unchecked Sendable {
             height = Int(dims.height)
         }
 
+        // Feste Bitrate statt Encoder-Automatik: die wählt bei dunklen Szenen
+        // drastisch wenig (gemessen 2,6 statt 17 Mbit/s) und macht genau die
+        // Nacht-Clips matschig, um die es hier geht. ~8 Bit je Pixel bei 30 fps,
+        // bei Zeitlupen-Bildraten entsprechend mehr.
+        let bitsPerSecond = Int(Double(width * height) * (nominalFPS > 60 ? 14 : 8))
         let vIn = AVAssetWriterInput(mediaType: .video, outputSettings: [
             AVVideoCodecKey: AVVideoCodecType.h264,
             AVVideoWidthKey: width,
             AVVideoHeightKey: height,
+            AVVideoCompressionPropertiesKey: [
+                AVVideoAverageBitRateKey: bitsPerSecond,
+                AVVideoExpectedSourceFrameRateKey: Int(nominalFPS),
+                AVVideoMaxKeyFrameIntervalKey: Int(nominalFPS),
+            ],
         ])
         vIn.expectsMediaDataInRealTime = true
         vIn.transform = CGAffineTransform(rotationAngle: rotationAngle * .pi / 180)

@@ -139,6 +139,8 @@ struct CapturesView: View {
             CaptureDetailSheet(item: item) {
                 delete(item)
                 selected = nil
+            } onChanged: {
+                items = CaptureStore.items()
             }
         }
         .onAppear { items = CaptureStore.items() }
@@ -207,7 +209,15 @@ private struct CaptureThumb: View {
 private struct CaptureDetailSheet: View {
     let item: CaptureItem
     let onDelete: () -> Void
+    /// Ablage hat sich geändert (z. B. getrimmte Kopie) — Galerie neu laden.
+    var onChanged: () -> Void = {}
     @Environment(\.dismiss) private var dismiss
+    @State private var showTrimmer = false
+    @State private var trimMessage: String?
+
+    private var canTrim: Bool {
+        item.isVideo && UIVideoEditorController.canEditVideo(atPath: item.url.path)
+    }
 
     var body: some View {
         NavigationStack {
@@ -229,6 +239,14 @@ private struct CaptureDetailSheet: View {
                     Button("Fertig") { dismiss() }
                 }
                 ToolbarItemGroup(placement: .topBarTrailing) {
+                    if canTrim {
+                        Button {
+                            showTrimmer = true
+                        } label: {
+                            Image(systemName: "scissors")
+                        }
+                        .accessibilityLabel("Clip trimmen")
+                    }
                     ShareLink(item: item.url)
                     Button(role: .destructive) { onDelete() } label: {
                         Image(systemName: "trash")
@@ -236,6 +254,77 @@ private struct CaptureDetailSheet: View {
                     .accessibilityLabel("Aufnahme löschen")
                 }
             }
+            .fullScreenCover(isPresented: $showTrimmer) {
+                VideoTrimmer(url: item.url) { edited in
+                    // Getrimmte Fassung als NEUE Aufnahme übernehmen — das
+                    // Original bleibt, bis man es selbst löscht.
+                    if CaptureStore.adopt(edited) != nil {
+                        trimMessage = "Getrimmte Kopie gesichert — das Original bleibt erhalten."
+                        onChanged()
+                        Haptics.success()
+                    } else {
+                        trimMessage = "Getrimmte Fassung konnte nicht gesichert werden."
+                        Haptics.error()
+                    }
+                }
+                .ignoresSafeArea()
+            }
+            .alert("Trimmen", isPresented: Binding(get: { trimMessage != nil },
+                                                   set: { if !$0 { trimMessage = nil } })) {
+                Button("OK", role: .cancel) {}
+            } message: {
+                Text(trimMessage ?? "")
+            }
+        }
+    }
+}
+
+// MARK: - Trimmen
+
+/// Der System-Videoeditor (UIVideoEditorController): Anfang/Ende zuschneiden,
+/// gespeichert wird in eine tmp-Datei, die der Aufrufer übernimmt.
+private struct VideoTrimmer: UIViewControllerRepresentable {
+    let url: URL
+    let onSaved: (URL) -> Void
+    @Environment(\.dismiss) private var dismiss
+
+    func makeUIViewController(context: Context) -> UIVideoEditorController {
+        let vc = UIVideoEditorController()
+        vc.videoPath = url.path
+        vc.videoQuality = .typeHigh
+        vc.delegate = context.coordinator
+        return vc
+    }
+
+    func updateUIViewController(_ vc: UIVideoEditorController, context: Context) {}
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(onSaved: onSaved, dismiss: { dismiss() })
+    }
+
+    final class Coordinator: NSObject, UIVideoEditorControllerDelegate,
+                             UINavigationControllerDelegate {
+        let onSaved: (URL) -> Void
+        let dismiss: () -> Void
+
+        init(onSaved: @escaping (URL) -> Void, dismiss: @escaping () -> Void) {
+            self.onSaved = onSaved
+            self.dismiss = dismiss
+        }
+
+        func videoEditorController(_ editor: UIVideoEditorController,
+                                   didSaveEditedVideoToPath editedVideoPath: String) {
+            onSaved(URL(fileURLWithPath: editedVideoPath))
+            dismiss()
+        }
+
+        func videoEditorControllerDidCancel(_ editor: UIVideoEditorController) {
+            dismiss()
+        }
+
+        func videoEditorController(_ editor: UIVideoEditorController,
+                                   didFailWithError error: Error) {
+            dismiss()
         }
     }
 }

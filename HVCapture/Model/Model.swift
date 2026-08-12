@@ -109,6 +109,7 @@ enum TripReason: String, Codable, CaseIterable, Sendable {
     case pulse          // Puls-Modus, planmässige Aus-Phase
     case deadManSwitch  // Totmann-Taste losgelassen
     case manual         // Not-Aus von Hand
+    case background     // App in den Hintergrund (Displaysperre, App-Wechsel)
 
     var label: String {
         switch self {
@@ -120,6 +121,7 @@ enum TripReason: String, Codable, CaseIterable, Sendable {
         case .pulse: return "Puls-Pause"
         case .deadManSwitch: return "Totmann-Taste losgelassen"
         case .manual: return "Not-Aus von Hand"
+        case .background: return "App im Hintergrund"
         }
     }
 
@@ -133,14 +135,17 @@ enum TripReason: String, Codable, CaseIterable, Sendable {
         case .pulse: return "waveform.path"
         case .deadManSwitch: return "hand.raised.fill"
         case .manual: return "hand.raised.slash.fill"
+        case .background: return "iphone.slash"
         }
     }
 
     /// Deutet auf einen Defekt hin — muss quittiert werden, bevor wieder
-    /// eingeschaltet werden kann.
+    /// eingeschaltet werden kann. `.background` gehört dazu, damit die
+    /// Abschaltung nie kommentarlos passiert: „schaltet einfach aus" war
+    /// vorher genau dieser stumme Weg.
     var requiresAcknowledgement: Bool {
         switch self {
-        case .threshold, .flatness, .dataLoss, .deadMan: return true
+        case .threshold, .flatness, .dataLoss, .deadMan, .background: return true
         case .timer, .pulse, .deadManSwitch, .manual: return false
         }
     }

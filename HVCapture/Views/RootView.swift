@@ -13,6 +13,8 @@ struct RootView: View {
     @State private var showBoot = BootAnimation.isEnabled
     @State private var gatePassed = false
     @State private var lock = AppLock.shared
+    @State private var store = SessionStore.shared
+    @State private var milestones = MilestoneTracker.shared
     @AppStorage("onboarded") private var onboarded = false
 
     var body: some View {
@@ -38,6 +40,22 @@ struct RootView: View {
                     .transition(.opacity)
                     .zIndex(1)
             }
+        }
+        // Nach jeder gespeicherten Session: Meilensteine prüfen, Toast zeigen.
+        .onChange(of: store.sessions.count) {
+            milestones.evaluate(Records.from(store.sessions))
+        }
+        .overlay(alignment: .top) {
+            if let m = milestones.justUnlocked {
+                MilestoneToast(milestone: m)
+                    .zIndex(2)
+            }
+        }
+        .animation(.snappy, value: milestones.justUnlocked)
+        .task(id: milestones.justUnlocked?.id) {
+            guard milestones.justUnlocked != nil else { return }
+            try? await Task.sleep(for: .seconds(4))
+            milestones.clearToast()
         }
     }
 }
@@ -117,6 +135,8 @@ struct SafetyItem: Identifiable, Equatable {
 struct SafetyGateView: View {
     let onPass: () -> Void
     @State private var checked: Set<String> = []
+    /// Wird über die 10 Tipps auf die Version in den Einstellungen gesetzt.
+    @AppStorage("devModeUnlocked") private var devUnlocked = false
 
     private var allChecked: Bool { checked.count == SafetyItem.all.count }
 
@@ -153,7 +173,24 @@ struct SafetyGateView: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .frame(maxWidth: .infinity, alignment: .center)
+                    .padding(.bottom, devUnlocked ? 4 : 24)
+
+                // Nur im freigeschalteten Entwicklermodus: die Liste überspringen,
+                // wenn man ohne Aufbau bloss etwas in der App testet.
+                if devUnlocked {
+                    Button {
+                        Haptics.warning()
+                        onPass()
+                    } label: {
+                        Label("Überspringen — nur App testen, kein Aufbau", systemImage: "wrench.and.screwdriver")
+                            .font(.footnote)
+                    }
+                    .buttonStyle(.bordered)
+                    .tint(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .center)
                     .padding(.bottom, 24)
+                    .accessibilityLabel("Checkliste überspringen, Entwicklermodus")
+                }
             }
             .padding()
         }

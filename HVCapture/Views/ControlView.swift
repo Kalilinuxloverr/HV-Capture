@@ -21,8 +21,30 @@ struct ControlView: View {
     /// Laufender Einschalt-Countdown (nil = keiner).
     @State private var preRoll: Int?
     @State private var preRollTask: Task<Void, Never>?
+    /// Frei-Modus: Sicherheitsabfrage vor JEDEM Einschalten.
+    @State private var showFreeWarning = false
+    @Environment(\.verticalSizeClass) private var verticalSizeClass
 
     var body: some View {
+        Group {
+            // Quer gedreht wird die Steuerung zur Grossanzeige — vom Aufbau
+            // aus lesbar, zurückdrehen holt die normale Ansicht wieder.
+            if verticalSizeClass == .compact {
+                BigMeterView()
+                    .toolbar(.hidden, for: .navigationBar, .tabBar)
+            } else {
+                controlBody
+            }
+        }
+        .alert("Frei-Modus einschalten?", isPresented: $showFreeWarning) {
+            Button("Einschalten", role: .destructive) { beginArm() }
+            Button("Abbrechen", role: .cancel) {}
+        } message: {
+            Text("Kein automatisches Ende: Es bleibt an, bis DU abschaltest. Nur die Selbstabschaltung der Dose sichert ab. Not-Aus in Reichweite? Niemand am Aufbau?")
+        }
+    }
+
+    private var controlBody: some View {
         ScrollView {
             VStack(spacing: 14) {
                 if let trip = controller.pendingTrip { tripBanner(trip) }
@@ -39,6 +61,16 @@ struct ControlView: View {
         .appBackground()
         .navigationTitle("Steuerung")
         .overlay { if let n = preRoll { preRollOverlay(n) } }
+    }
+
+    /// Einschalt-Wunsch aus dem EIN-Knopf: der Frei-Modus verlangt jedes Mal
+    /// eine bestätigte Sicherheitsabfrage, alle anderen Modi starten direkt.
+    private func requestArm() {
+        if controller.mode == .free {
+            showFreeWarning = true
+        } else {
+            beginArm()
+        }
     }
 
     // MARK: - Einschalt-Countdown
@@ -184,7 +216,7 @@ struct ControlView: View {
                         if controller.isArmed {
                             Task { await controller.disarm() }
                         } else {
-                            beginArm()
+                            requestArm()
                         }
                     }
                 }

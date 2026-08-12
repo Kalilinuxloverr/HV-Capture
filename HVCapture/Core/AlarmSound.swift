@@ -60,7 +60,8 @@ enum AlarmSound {
         return wav(samples, sampleRate: rate)
     }
 
-    private static func wav(_ samples: [Int16], sampleRate: Int) -> Data {
+    /// Auch der Geiger-Klick baut sein Geräusch hierüber.
+    static func wav(_ samples: [Int16], sampleRate: Int) -> Data {
         let bytesPerSample = 2
         let dataSize = samples.count * bytesPerSample
         var d = Data()

@@ -7,6 +7,7 @@
 //
 
 import SwiftUI
+import UIKit
 
 // MARK: - Betriebsarten
 
@@ -80,6 +81,9 @@ final class ArcController {
 
     private var arcGuard = ArcGuard()
     private var modeTask: Task<Void, Never>?
+    /// Seit wann scharf — die Dose-meldet-AUS-Prüfung braucht eine kurze
+    /// Anlaufzeit, sonst reisst ein veralteter Zustandswert vom Poll davor.
+    private var armedAt: Date?
 
     private let plug = PlugLink.shared
     private let recorder = SessionRecorder.shared
@@ -160,7 +164,17 @@ final class ArcController {
             return false
         }
 
+        // Rest-Auftrag einer früher abgebrochenen Timer-Session löschen — der
+        // feuerte sonst irgendwann mitten in einer Frei-Session „POWER OFF",
+        // scheinbar grundlos. Im Timer-Modus überschreibt der neue Auftrag
+        // gleich denselben Slot, da ist nichts zu löschen.
+        if mode != .timer { await plug.cancelSessionTimer() }
+
         isArmed = true
+        armedAt = Date()
+        // Autosperre aus, solange scharf: das automatische Sperren schickte die
+        // App in den Hintergrund — und der Hintergrund schaltet ab.
+        UIApplication.shared.isIdleTimerDisabled = true
         plug.setFast(true)
         statusMessage = nil
         LiveActivityController.start(modeLabel: mode.label)
@@ -174,13 +188,23 @@ final class ArcController {
         secondsRemaining = nil
         pulseCycle = 0
         isArmed = false
+        armedAt = nil
         arcBurning = false
+        UIApplication.shared.isIdleTimerDisabled = false
+        GeigerClick.shared.stop()
         plug.setFast(false)
         arcGuard.disarm()
         recorder.record(trip: reason)
         await plug.forceOff()
+        await plug.cancelSessionTimer()
         await plug.stopWatchdog()
         _ = recorder.stop()
+        // Quittierungspflichtige Gründe immer sichtbar machen — auch wenn die
+        // Abschaltung nicht aus dem Wächter kam (z. B. App im Hintergrund).
+        if reason.requiresAcknowledgement, pendingTrip == nil {
+            pendingTrip = TripRecord(reason: reason, detail: nil, date: Date())
+            TripNotifier.fire(reason: reason, detail: nil)
+        }
         LiveTheme.shared.reset()
         LiveActivityController.end(tripLabel: reason.requiresAcknowledgement ? reason.label : nil)
     }
@@ -212,6 +236,20 @@ final class ArcController {
 
         guard isArmed else { return }
 
+        GeigerClick.shared.feed(watts: reading?.watts)
+
+        // Die Dose meldet AUS, obwohl scharf: ihre Selbstabschaltung hat
+        // gegriffen (WLAN-Störung durch den Bogen), ein Alt-Auftrag hat gefeuert
+        // oder jemand hat von aussen geschaltet. Nie still hinnehmen — vorher
+        // lief die App einfach weiter und niemand erfuhr einen Grund.
+        if plug.isOn == false,
+           let armedAt, Date().timeIntervalSince(armedAt) > 3,
+           !(mode == .pulse && (secondsRemaining ?? 0) < 0) {
+            executeTrip(.deadMan,
+                        detail: "Die Steckdose meldet AUS, obwohl scharfgeschaltet — vermutlich hat ihre Selbstabschaltung gegriffen.")
+            return
+        }
+
         let decision = arcGuard.evaluate(reading)
         arcBurning = decision.arcBurning
         recorder.ingest(reading, decision: decision)
@@ -227,19 +265,24 @@ final class ArcController {
                                       recentWatts: spark)
 
         if let trip = decision.trip {
-            pendingTrip = TripRecord(reason: trip, detail: decision.detail, date: Date())
-            Haptics.error()
-            // Alarmton und Mitteilung — beide nur bei quittierungspflichtigen
-            // Trips (das entscheiden die Helfer selbst).
-            AlarmSound.play()
-            TripNotifier.fire(reason: trip, detail: decision.detail)
-            // Sofort synchron entschärfen: das eigentliche Abschalten ist
-            // asynchron, und bis es durch ist, kämen sonst weitere Messwerte
-            // hier an und würden denselben Vorgang mehrfach anstossen.
-            isArmed = false
-            arcGuard.disarm()
-            Task { await disarm(reason: trip) }
+            executeTrip(trip, detail: decision.detail)
         }
+    }
+
+    /// Gemeinsamer Abschaltweg für alle Trips aus dem Messwertstrom.
+    private func executeTrip(_ reason: TripReason, detail: String?) {
+        pendingTrip = TripRecord(reason: reason, detail: detail, date: Date())
+        Haptics.error()
+        // Alarmton und Mitteilung — beide nur bei quittierungspflichtigen
+        // Trips (das entscheiden die Helfer selbst).
+        AlarmSound.play()
+        TripNotifier.fire(reason: reason, detail: detail)
+        // Sofort synchron entschärfen: das eigentliche Abschalten ist
+        // asynchron, und bis es durch ist, kämen sonst weitere Messwerte
+        // hier an und würden denselben Vorgang mehrfach anstossen.
+        isArmed = false
+        arcGuard.disarm()
+        Task { await disarm(reason: reason) }
     }
 
     func resetCalibration() { calibration = Calibration() }
@@ -305,6 +348,7 @@ struct HVCaptureApp: App {
     @Environment(\.scenePhase) private var scenePhase
 
     init() {
+        Self.applyLanguageOverride()
         PlugLink.shared.startPolling()
         SessionStore.shared.load()
         WatchBridge.shared.activate()     // ohne Uhr schlicht wirkungslos
@@ -322,15 +366,28 @@ struct HVCaptureApp: App {
             switch phase {
             case .background:
                 // Im Hintergrund kann die App den Selbstabschalt-Auftrag nicht
-                // zuverlässig erneuern. Statt darauf zu hoffen, wird abgeschaltet.
+                // zuverlässig erneuern. Statt darauf zu hoffen, wird abgeschaltet —
+                // mit eigenem Grund, damit es nie wie ein grundloses Aus aussieht.
                 if ArcController.shared.isArmed {
-                    Task { await ArcController.shared.disarm(reason: .deadMan) }
+                    Task { await ArcController.shared.disarm(reason: .background) }
                 }
                 // Beim nächsten Aktivieren wieder nach Face ID fragen.
                 AppLock.shared.lockIfEnabled()
             default:
                 break
             }
+        }
+    }
+
+    /// Erzwingt die gewählte App-Sprache über `AppleLanguages`. Standard ist
+    /// Deutsch: die englische Übersetzung deckt (noch) nicht alles ab, und ein
+    /// englisches System bekam sonst ein Deutsch-Englisch-Gemisch. Greift beim
+    /// nächsten Prozessstart — deshalb ganz am Anfang von `init`.
+    private static func applyLanguageOverride() {
+        let d = UserDefaults.standard
+        switch d.string(forKey: "appLanguage") ?? "de" {
+        case "system": d.removeObject(forKey: "AppleLanguages")
+        case let lang: d.set([lang], forKey: "AppleLanguages")
         }
     }
 }

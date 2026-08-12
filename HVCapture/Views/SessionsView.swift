@@ -106,6 +106,13 @@ struct SessionsView: View {
                 }
                 .listRowBackground(Palette.card)
                 .accessibilityLabel("Energie und Kosten")
+                NavigationLink {
+                    MilestonesView()
+                } label: {
+                    Label("Meilensteine", systemImage: "rosette")
+                }
+                .listRowBackground(Palette.card)
+                .accessibilityLabel("Meilenstein-Abzeichen")
             }
 
             if !store.electrodeWear.isEmpty {

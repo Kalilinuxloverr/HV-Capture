@@ -55,6 +55,9 @@ struct BackupBundle: Codable {
         "rigMotCount", "rigTopology", "rigEmiBoard", "rigBallast",
         "tripNotificationsEnabled", "alarmSoundEnabled", "appLockEnabled",
         "preRollSeconds", "videoQuality",
+        "appLanguage", "geigerEnabled", "burstCount", "photosExportEnabled",
+        "captureMode", "ringBufferSeconds", "postRollSeconds", "hudBurnIn",
+        "triggerAuto", "triggerBrightness", "triggerCurrent", "triggerAudio",
     ]
 }
 
