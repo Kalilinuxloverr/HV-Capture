@@ -1,11 +1,13 @@
 //
-//  CaptureEngine.swift — Kamera mit Ringpuffer und automatischen Auslösern.
+//  CaptureEngine.swift — Kamera mit vier Modi: Foto, normales Video, Bogen-Clip
+//  (Ringpuffer + Auslöser) und Zeitlupe.
 //
-//  Das Motiv ist ein sehr heller, sehr kurzer Lichtbogen. Zwei Konsequenzen
-//  bestimmen den Aufbau: Erstens läuft das Bild dauerhaft in einen Ringpuffer,
-//  damit ein Auslöser auch die Sekunden VOR dem Ereignis sichern kann — sonst
-//  ist alles vorbei, bevor der Finger den Knopf trifft. Zweitens ist die
-//  Belichtung standardmässig manuell, weil jede Automatik am Bogen überstrahlt.
+//  Foto und Video laufen wie die System-Kamera über AVCapturePhotoOutput bzw.
+//  AVCaptureMovieFileOutput: Hardware-Encoder, Stabilisierung, Autofokus —
+//  scharf, flüssig, richtige Ausrichtung, und die CPU bleibt kalt. Nur die
+//  Bogen-Modi brauchen den Segment-Ring, weil ein Auslöser auch die Sekunden
+//  VOR dem Ereignis sichern können muss. Die Session wird je Modus neu
+//  zusammengesetzt — was ein Modus nicht braucht, läuft auch nicht mit.
 //
 
 import AVFoundation
@@ -18,13 +20,14 @@ import UIKit
 // MARK: - Modi
 
 enum CaptureMode: String, CaseIterable, Identifiable {
-    case photo, video, slowMotion
+    case photo, video, arc, slowMotion
     var id: String { rawValue }
 
     var label: String {
         switch self {
         case .photo: return "Foto"
         case .video: return "Video"
+        case .arc: return "Bogen"
         case .slowMotion: return "Zeitlupe"
         }
     }
@@ -33,9 +36,14 @@ enum CaptureMode: String, CaseIterable, Identifiable {
         switch self {
         case .photo: return "camera.fill"
         case .video: return "video.fill"
+        case .arc: return "bolt.circle.fill"
         case .slowMotion: return "slowmo"
         }
     }
+
+    /// Bogen und Zeitlupe puffern über den Segment-Ring und kennen Auslöser
+    /// mit Vorlauf; Foto und Video verhalten sich wie die System-Kamera.
+    var usesRing: Bool { self == .arc || self == .slowMotion }
 }
 
 enum TriggerSource: String, CaseIterable, Identifiable {
@@ -69,10 +77,8 @@ private enum CaptureDefaults {
     static let postRollSeconds = 3.0
     static let brightnessDelta = 0.18
     static let audioDelta = 0.25
-    // Bogen-Belichtung ist Opt-in (Knopf im Sucher), nicht mehr Standard: die
-    // alten Werte (1/1000 s, ISO 50) haben ausser dem Bogen alles schwarz
-    // gemacht. Auch das Preset selbst ist jetzt milder — dunkel genug, dass
-    // der Bogen Struktur behält, hell genug, dass die Szene erkennbar bleibt.
+    // Bogen-Belichtung ist Opt-in (Knopf im Sucher), nicht Standard: Automatik
+    // liefert nachts die brauchbaren Videos (Szene + Bogen).
     static let exposureDuration = 1.0 / 250
     static let exposureISO = 200.0
     static let albumName = "HV-Capture"
@@ -81,6 +87,7 @@ private enum CaptureDefaults {
     static let triggerCooldown = 1.5
     /// Zeitlupe wird geschrieben, als wären es 30 fps.
     static let slowMotionPlaybackFPS = 30.0
+    static let maxZoom = 8.0
 }
 
 // MARK: - Engine
@@ -100,26 +107,40 @@ final class CaptureEngine: NSObject {
     private(set) var lastClipURL: URL?
     private(set) var lastPhoto: UIImage?
     private(set) var bufferedSeconds: Double = 0
+    private(set) var recordingSeconds: Double = 0
     private(set) var audioLevel: Double = 0
     private(set) var spectrum: [Double] = Array(repeating: 0, count: 16)
     private(set) var currentLuma: Double = 0
     private(set) var lastTrigger: TriggerSource?
     private(set) var isConfigured = false
+    private(set) var zoomFactor: Double = 1
+    private(set) var torchOn = false
+    /// Hinweis, sobald das Gerät thermisch drosselt; bei kritischer Hitze
+    /// stoppt die Kamera ganz — das iPhone soll nie wegen der App kochen.
+    private(set) var thermalWarning: String?
 
     let session = AVCaptureSession()
     private let videoOutput = AVCaptureVideoDataOutput()
     private let audioOutput = AVCaptureAudioDataOutput()
     private let photoOutput = AVCapturePhotoOutput()
+    private let movieOutput = AVCaptureMovieFileOutput()
     private let queue = DispatchQueue(label: "dev.leonfrohlich.hvcapture.capture")
 
     private var device: AVCaptureDevice?
+    private var micAllowed = false
     private var lastTriggerAt: Date?
     private var lastWatts: Double?
     private var nominalFPS: Double = 30
+    /// Modus, für den die Session gerade zusammengesetzt ist.
+    private var configuredMode: CaptureMode?
+    /// Rotationswinkel der Aufnahme in Grad (90 = Hochformat).
+    private var rotationAngle: Double = 90
+    private var recordingTimer: Task<Void, Never>?
+    private var autoStopTask: Task<Void, Never>?
+    private var thermalObserver: NSObjectProtocol?
 
     /// Zustand, der ausschliesslich auf der Capture-Queue lebt: der Segment-Ring
-    /// und die Auslöser-Analyse. `ring` wird einmalig in configure() gesetzt,
-    /// bevor die Session läuft.
+    /// und die Auslöser-Analyse.
     private final class QueueState: @unchecked Sendable {
         var ring: SegmentRing?
         var lumaAverage: Double?
@@ -135,13 +156,21 @@ final class CaptureEngine: NSObject {
 
     var mode: CaptureMode {
         get {
-            // „clip" (Auto-Clip aus den Einstellungen) heisst normale Bildrate
-            // mit Ringpuffer-Auslösern — NICHT Zeitlupe. Der alte Fallback auf
-            // .slowMotion hat die Kamera ungefragt auf 240 fps gestellt.
             CaptureMode(rawValue: UserDefaults.standard.string(forKey: "captureMode") ?? "")
-                ?? .video
+                ?? .arc
         }
         set { UserDefaults.standard.set(newValue.rawValue, forKey: "captureMode") }
+    }
+
+    /// „clip" (uralt) und „video" (bis 1.0 der Ringpuffer-Modus) heissen jetzt
+    /// „arc" — Video ist seither der normale System-Kamera-Modus.
+    private func migrateModeKey() {
+        let d = UserDefaults.standard
+        let raw = d.string(forKey: "captureMode")
+        if raw == "clip" || (raw == "video" && !d.bool(forKey: "modeMigratedToArc")) {
+            d.set(CaptureMode.arc.rawValue, forKey: "captureMode")
+        }
+        d.set(true, forKey: "modeMigratedToArc")
     }
 
     var ringSeconds: Double {
@@ -154,6 +183,10 @@ final class CaptureEngine: NSObject {
     var postRoll: Double {
         UserDefaults.standard.object(forKey: "postRollSeconds") as? Double
             ?? CaptureDefaults.postRollSeconds
+    }
+
+    private var wants4K: Bool {
+        UserDefaults.standard.string(forKey: "videoQuality") == "4k"
     }
 
     private var autoAll: Bool { UserDefaults.standard.bool(forKey: "triggerAuto") }
@@ -170,80 +203,141 @@ final class CaptureEngine: NSObject {
 
     // MARK: Aufbau
 
+    /// Setzt die Session für den aktuellen Modus zusammen. Mehrfach aufrufbar —
+    /// ein Moduswechsel im Sucher ruft genau das hier erneut.
     func configure() async {
-        guard !isConfigured else { return }
-
-        let camOK = await AVCaptureDevice.requestAccess(for: .video)
-        let micOK = await AVCaptureDevice.requestAccess(for: .audio)
-        guard camOK else {
-            permissionDenied = true
-            lastError = "Ohne Kamerazugriff kann nicht aufgenommen werden."
-            return
+        if !isConfigured {
+            migrateModeKey()
+            let camOK = await AVCaptureDevice.requestAccess(for: .video)
+            micAllowed = await AVCaptureDevice.requestAccess(for: .audio)
+            guard camOK else {
+                permissionDenied = true
+                lastError = "Ohne Kamerazugriff kann nicht aufgenommen werden."
+                return
+            }
+            permissionDenied = false
+            startThermalWatch()
         }
-        permissionDenied = false
+
+        let m = mode
+        guard m != configuredMode else { return }
+        if isRecording { stopRecording() }
 
         session.beginConfiguration()
-        session.sessionPreset = .high
 
-        guard let cam = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: .back),
-              let input = try? AVCaptureDeviceInput(device: cam),
-              session.canAddInput(input)
-        else {
-            session.commitConfiguration()
-            lastError = "Keine nutzbare Kamera gefunden."
-            return
+        if session.inputs.isEmpty {
+            guard let cam = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: .back),
+                  let input = try? AVCaptureDeviceInput(device: cam),
+                  session.canAddInput(input)
+            else {
+                session.commitConfiguration()
+                lastError = "Keine nutzbare Kamera gefunden."
+                return
+            }
+            session.addInput(input)
+            device = cam
+            if micAllowed, let mic = AVCaptureDevice.default(for: .audio),
+               let micInput = try? AVCaptureDeviceInput(device: mic),
+               session.canAddInput(micInput) {
+                session.addInput(micInput)
+            }
         }
-        session.addInput(input)
-        device = cam
 
-        if micOK, let mic = AVCaptureDevice.default(for: .audio),
-           let micInput = try? AVCaptureDeviceInput(device: mic),
-           session.canAddInput(micInput) {
-            session.addInput(micInput)
+        // Ausgänge je Modus frisch — was der Modus nicht braucht, kostet sonst
+        // nur Strom und Wärme (die Frame-Analyse lief früher IMMER mit).
+        for output in session.outputs { session.removeOutput(output) }
+        q.ring = nil
+
+        switch m {
+        case .photo:
+            session.sessionPreset = .photo
+            if session.canAddOutput(photoOutput) { session.addOutput(photoOutput) }
+            photoOutput.maxPhotoQualityPrioritization = .quality
+            // Helligkeits-Auslöser funktioniert auch für Serienfotos.
+            addAnalysisOutputs(audio: false)
+
+        case .video:
+            let fourK = AVCaptureSession.Preset.hd4K3840x2160
+            session.sessionPreset = wants4K && session.canSetSessionPreset(fourK)
+                ? fourK : .hd1920x1080
+            if session.canAddOutput(movieOutput) { session.addOutput(movieOutput) }
+            configureMovieConnection()
+
+        case .arc, .slowMotion:
+            session.sessionPreset = .hd1920x1080
+            addAnalysisOutputs(audio: true)
         }
 
-        videoOutput.alwaysDiscardsLateVideoFrames = false
+        session.commitConfiguration()
+
+        if m == .slowMotion {
+            applyHighFrameRate()
+        } else {
+            nominalFPS = 30
+        }
+
+        // Standard ist Belichtungs-Automatik — die macht nachts brauchbare
+        // Videos (Szene + Bogen). Die dunkle Bogen-Belichtung gibt es als
+        // Knopf im Sucher, in den Bogen-Modi zusätzlich als Start-Option.
+        if m.usesRing,
+           (UserDefaults.standard.object(forKey: "manualExposure") as? Bool) ?? false {
+            applyArcPreset()
+        } else {
+            setAutoExposure()
+        }
+
+        if m.usesRing {
+            let r = SegmentRing(queue: queue)
+            r.ringSeconds = ringSeconds
+            r.rotationAngle = rotationAngle
+            r.slowFactor = m == .slowMotion
+                ? Swift.max(1, nominalFPS / CaptureDefaults.slowMotionPlaybackFPS) : 1
+            r.onBuffered = { [weak self] seconds in
+                Task { @MainActor in self?.bufferedSeconds = seconds }
+            }
+            r.onFinished = { [weak self] url in
+                Task { @MainActor in
+                    guard let self else { return }
+                    if let url {
+                        await self.saveVideo(url)
+                    } else {
+                        self.lastError = "Clip konnte nicht zusammengesetzt werden."
+                    }
+                    self.isRecording = false
+                }
+            }
+            q.ring = r
+        }
+
+        bufferedSeconds = 0
+        zoomFactor = Double(device?.videoZoomFactor ?? 1)
+        configuredMode = m
+        isConfigured = true
+        refreshRotation()
+    }
+
+    private func addAnalysisOutputs(audio: Bool) {
+        // Späte Frames verwerfen statt aufstauen — ein voller Puffer äussert
+        // sich sonst als wachsender Versatz und Ruckeln im Clip.
+        videoOutput.alwaysDiscardsLateVideoFrames = true
         videoOutput.videoSettings = [
             kCVPixelBufferPixelFormatTypeKey as String:
                 kCVPixelFormatType_420YpCbCr8BiPlanarFullRange,
         ]
         videoOutput.setSampleBufferDelegate(self, queue: queue)
         if session.canAddOutput(videoOutput) { session.addOutput(videoOutput) }
-
-        audioOutput.setSampleBufferDelegate(self, queue: queue)
-        if session.canAddOutput(audioOutput) { session.addOutput(audioOutput) }
-
-        if session.canAddOutput(photoOutput) { session.addOutput(photoOutput) }
-
-        session.commitConfiguration()
-
-        if mode == .slowMotion { applyHighFrameRate() }
-        // Standard ist Belichtungs-Automatik — die macht nachts brauchbare
-        // Videos (Szene + Bogen), siehe iPad-Vergleich vom 11.08. Die dunkle
-        // Bogen-Belichtung gibt es weiterhin als Knopf im Sucher.
-        if (UserDefaults.standard.object(forKey: "manualExposure") as? Bool) ?? false {
-            applyArcPreset()
+        if audio {
+            audioOutput.setSampleBufferDelegate(self, queue: queue)
+            if session.canAddOutput(audioOutput) { session.addOutput(audioOutput) }
         }
+    }
 
-        let r = SegmentRing(queue: queue)
-        r.ringSeconds = ringSeconds
-        r.slowFactor = mode == .slowMotion ? Swift.max(1, nominalFPS / CaptureDefaults.slowMotionPlaybackFPS) : 1
-        r.onBuffered = { [weak self] seconds in
-            Task { @MainActor in self?.bufferedSeconds = seconds }
+    private func configureMovieConnection() {
+        guard let c = movieOutput.connection(with: .video) else { return }
+        if c.isVideoStabilizationSupported { c.preferredVideoStabilizationMode = .auto }
+        if movieOutput.availableVideoCodecTypes.contains(.hevc) {
+            movieOutput.setOutputSettings([AVVideoCodecKey: AVVideoCodecType.hevc], for: c)
         }
-        r.onFinished = { [weak self] url in
-            Task { @MainActor in
-                guard let self else { return }
-                if let url {
-                    await self.saveVideo(url)
-                } else {
-                    self.lastError = "Clip konnte nicht zusammengesetzt werden."
-                }
-                self.isRecording = false
-            }
-        }
-        q.ring = r
-        isConfigured = true
     }
 
     func start() {
@@ -255,16 +349,104 @@ final class CaptureEngine: NSObject {
 
     func stop() {
         guard isRunning else { return }
+        if isRecording { stopRecording() }
+        if torchOn { toggleTorch() }
         isRunning = false
         let s = session
         Task.detached { s.stopRunning() }
     }
 
+    // MARK: Ausrichtung
+
+    /// Übernimmt die aktuelle Geräte-Ausrichtung in alle Aufnahmewege. Ohne das
+    /// landet jedes Hochformat-Video liegend in der Mediathek.
+    func refreshRotation() {
+        let angle: Double
+        switch UIDevice.current.orientation {
+        case .portrait: angle = 90
+        case .portraitUpsideDown: angle = 270
+        case .landscapeLeft: angle = 0
+        case .landscapeRight: angle = 180
+        default: return   // faceUp/faceDown: letzte bekannte Lage behalten
+        }
+        rotationAngle = angle
+        applyRotation()
+    }
+
+    private func applyRotation() {
+        let angle = rotationAngle
+        for c in [movieOutput.connection(with: .video), photoOutput.connection(with: .video)] {
+            if let c, c.isVideoRotationAngleSupported(CGFloat(angle)) {
+                c.videoRotationAngle = CGFloat(angle)
+            }
+        }
+        let r = q.ring
+        queue.async { r?.rotationAngle = angle }
+    }
+
+    // MARK: Thermik
+
+    private func startThermalWatch() {
+        updateThermal()
+        thermalObserver = NotificationCenter.default.addObserver(
+            forName: ProcessInfo.thermalStateDidChangeNotification,
+            object: nil, queue: .main
+        ) { _ in
+            Task { @MainActor in CaptureEngine.shared.updateThermal() }
+        }
+    }
+
+    private func updateThermal() {
+        switch ProcessInfo.processInfo.thermalState {
+        case .critical:
+            thermalWarning = "iPhone zu heiss — Kamera pausiert, bis es abgekühlt ist."
+            stop()
+        case .serious:
+            thermalWarning = "iPhone wird warm — kürzere Aufnahmen helfen, Zeitlupe meiden auch."
+        default:
+            thermalWarning = nil
+        }
+    }
+
+    // MARK: Zoom, Fokus, Licht
+
+    func setZoom(_ factor: Double) {
+        guard let d = device, (try? d.lockForConfiguration()) != nil else { return }
+        defer { d.unlockForConfiguration() }
+        let limit = Swift.min(CaptureDefaults.maxZoom, Double(d.activeFormat.videoMaxZoomFactor))
+        let f = Swift.min(Swift.max(factor, 1), limit)
+        d.videoZoomFactor = CGFloat(f)
+        zoomFactor = f
+    }
+
+    /// Fokus- und Belichtungspunkt auf die angetippte Stelle — die Automatik
+    /// arbeitet danach um diesen Punkt herum weiter.
+    func focus(at devicePoint: CGPoint) {
+        guard let d = device, (try? d.lockForConfiguration()) != nil else { return }
+        defer { d.unlockForConfiguration() }
+        if d.isFocusPointOfInterestSupported, d.isFocusModeSupported(.continuousAutoFocus) {
+            d.focusPointOfInterest = devicePoint
+            d.focusMode = .continuousAutoFocus
+        }
+        if d.isExposurePointOfInterestSupported,
+           d.isExposureModeSupported(.continuousAutoExposure) {
+            d.exposurePointOfInterest = devicePoint
+            d.exposureMode = .continuousAutoExposure
+        }
+    }
+
+    func toggleTorch() {
+        guard let d = device, d.hasTorch, (try? d.lockForConfiguration()) != nil else { return }
+        defer { d.unlockForConfiguration() }
+        let newValue = !torchOn
+        d.torchMode = newValue ? .on : .off
+        torchOn = newValue
+    }
+
     // MARK: Belichtung
 
     /// Kurze Zeit, niedriger ISO, Fokus und Weissabgleich fest. Die Werte
-    /// werden auf das geklemmt, was das Gerät im aktiven Format wirklich kann —
-    /// die reale Kamera hat andere Grenzen, als die Wunschwerte annehmen.
+    /// werden auf das geklemmt, was das Gerät im aktiven Format wirklich kann.
     func applyArcPreset() {
         guard let d = device, (try? d.lockForConfiguration()) != nil else { return }
         defer { d.unlockForConfiguration() }
@@ -330,15 +512,25 @@ final class CaptureEngine: NSObject {
         lastTriggerAt = now
         lastTrigger = source
         Haptics.light()
-        if mode == .photo {
-            // Serienfotos: jeder Auslöser macht ein Foto statt eines Clips.
+        switch mode {
+        case .photo:
             capturePhoto()
-            return
+        case .video:
+            // Kein Vorlauf möglich (der ist die Domäne des Bogen-Modus) —
+            // dafür ein normales Video ab jetzt, ähnlich lang wie ein Clip.
+            startRecording()
+            let seconds = ringSeconds + postRoll
+            autoStopTask = Task { [weak self] in
+                try? await Task.sleep(for: .seconds(seconds))
+                guard !Task.isCancelled else { return }
+                self?.stopRecording()
+            }
+        case .arc, .slowMotion:
+            isRecording = true
+            let post = postRoll
+            let r = q.ring
+            queue.async { r?.beginClip(postRollSeconds: post) }
         }
-        isRecording = true
-        let post = postRoll
-        let r = q.ring
-        queue.async { r?.beginClip(postRollSeconds: post) }
     }
 
     /// Wird vom Messwertstrom gefüttert; ein deutlicher Leistungssprung löst aus.
@@ -355,54 +547,87 @@ final class CaptureEngine: NSObject {
     // MARK: Aufnahme
 
     func capturePhoto() {
-        guard isRunning else { return }
-        photoOutput.capturePhoto(with: AVCapturePhotoSettings(), delegate: self)
+        guard isRunning, session.outputs.contains(photoOutput) else { return }
+        let settings = AVCapturePhotoSettings()
+        settings.photoQualityPrioritization = .quality
+        photoOutput.capturePhoto(with: settings, delegate: self)
     }
 
-    /// Durchgehende Aufnahme: der Ring wächst, bis `stopRecording()` den Clip
-    /// schliesst — der Vorlauf aus dem Puffer ist automatisch enthalten.
     func startRecording() {
         guard isRunning, !isRecording else { return }
         isRecording = true
-        let r = q.ring
-        queue.async { r?.beginContinuous() }
+        switch mode {
+        case .video:
+            let url = FileManager.default.temporaryDirectory
+                .appendingPathComponent("hv-vid-\(UUID().uuidString).mov")
+            applyRotation()
+            movieOutput.startRecording(to: url, recordingDelegate: self)
+            recordingTimer = Task { [weak self] in
+                while let self, self.isRecording, !Task.isCancelled {
+                    self.recordingSeconds = self.movieOutput.recordedDuration.seconds
+                    try? await Task.sleep(for: .milliseconds(500))
+                }
+            }
+        case .arc, .slowMotion:
+            // Durchgehende Aufnahme: der Ring wächst bis stopRecording();
+            // der Vorlauf aus dem Puffer ist automatisch enthalten.
+            let r = q.ring
+            queue.async { r?.beginContinuous() }
+        case .photo:
+            isRecording = false
+        }
     }
 
     func stopRecording() {
         guard isRecording else { return }
-        let r = q.ring
-        queue.async { r?.endContinuous() }
+        autoStopTask?.cancel()
+        autoStopTask = nil
+        switch mode {
+        case .video:
+            movieOutput.stopRecording()   // isRecording endet im Delegate
+        case .arc, .slowMotion:
+            let r = q.ring
+            queue.async { r?.endContinuous() }
+        case .photo:
+            isRecording = false
+        }
     }
 
     // MARK: Mediathek
 
     private func saveVideo(_ url: URL) async {
+        // Erst in die App-Ablage übernehmen — die Galerie in der App zeigt
+        // diese Dateien, unabhängig von der Fotomediathek.
+        let stored = CaptureStore.adopt(url) ?? url
+        lastClipURL = stored
+        lastPhoto = nil
+        lastSavedName = stored.lastPathComponent
+        SessionRecorder.shared.addMedia(stored.lastPathComponent)
+
         guard await ensurePhotoAccess() else { return }
         do {
-            // try?: Scheitert das Album (z. B. „Ausgewählte Fotos"), wird trotzdem
-            // gesichert — nur eben ohne Album. Sichern geht vor Sortieren.
             let album = try? await Self.album()
             try await PHPhotoLibrary.shared().performChanges {
-                guard let req = PHAssetChangeRequest.creationRequestForAssetFromVideo(atFileURL: url)
+                guard let req = PHAssetChangeRequest.creationRequestForAssetFromVideo(atFileURL: stored)
                 else { return }
                 if let album, let placeholder = req.placeholderForCreatedAsset {
                     PHAssetCollectionChangeRequest(for: album)?.addAssets([placeholder] as NSArray)
                 }
             }
-            lastSavedName = url.lastPathComponent
-            SessionRecorder.shared.addMedia(url.lastPathComponent)
-            // Vorschau: die tmp-Datei bleibt liegen, die vorherige fliegt raus.
-            if let old = lastClipURL, old != url {
-                try? FileManager.default.removeItem(at: old)
-            }
-            lastClipURL = url
-            lastPhoto = nil
         } catch {
-            lastError = "Sichern fehlgeschlagen: \(error.localizedDescription)"
+            lastError = "Sichern in der Mediathek fehlgeschlagen: \(error.localizedDescription)"
         }
     }
 
     private func savePhoto(_ data: Data) async {
+        let stored = CaptureStore.savePhoto(data)
+        lastPhoto = UIImage(data: data)
+        lastClipURL = nil
+        let name = stored?.lastPathComponent
+            ?? "Foto \(Date().formatted(date: .omitted, time: .standard))"
+        lastSavedName = name
+        SessionRecorder.shared.addMedia(name)
+
         guard await ensurePhotoAccess() else { return }
         do {
             let album = try? await Self.album()
@@ -413,16 +638,8 @@ final class CaptureEngine: NSObject {
                     PHAssetCollectionChangeRequest(for: album)?.addAssets([placeholder] as NSArray)
                 }
             }
-            let name = "Foto \(Date().formatted(date: .omitted, time: .standard))"
-            lastSavedName = name
-            SessionRecorder.shared.addMedia(name)
-            if let old = lastClipURL {
-                try? FileManager.default.removeItem(at: old)
-            }
-            lastClipURL = nil
-            lastPhoto = UIImage(data: data)
         } catch {
-            lastError = "Sichern fehlgeschlagen: \(error.localizedDescription)"
+            lastError = "Sichern in der Mediathek fehlgeschlagen: \(error.localizedDescription)"
         }
     }
 
@@ -432,7 +649,7 @@ final class CaptureEngine: NSObject {
         // (real passiert am 10.08., Crash-Report HVCapture-2026-08-10-210845).
         let status = await PHPhotoLibrary.requestAuthorization(for: .readWrite)
         guard status == .authorized || status == .limited else {
-            lastError = "Ohne Zugriff auf die Fotomediathek kann nichts gesichert werden."
+            lastError = "Ohne Zugriff auf die Fotomediathek landet nichts im Album — in der App-Galerie liegt die Aufnahme trotzdem."
             return false
         }
         return true
@@ -516,7 +733,34 @@ final class CaptureEngine: NSObject {
     }
 }
 
-// MARK: - Datenströme
+// MARK: - Normales Video (MovieFileOutput)
+
+extension CaptureEngine: AVCaptureFileOutputRecordingDelegate {
+    nonisolated func fileOutput(_ output: AVCaptureFileOutput,
+                                didFinishRecordingTo outputFileURL: URL,
+                                from connections: [AVCaptureConnection],
+                                error: Error?) {
+        // „Fehler" kann auch nur das reguläre Ende melden — massgeblich ist,
+        // ob die Datei fertig geschrieben wurde.
+        let finished = error == nil
+            || ((error as NSError?)?.userInfo[AVErrorRecordingSuccessfullyFinishedKey] as? Bool ?? false)
+        let text = error?.localizedDescription
+        Task { @MainActor in
+            let engine = CaptureEngine.shared
+            engine.recordingTimer?.cancel()
+            engine.recordingTimer = nil
+            engine.isRecording = false
+            engine.recordingSeconds = 0
+            if finished {
+                await engine.saveVideo(outputFileURL)
+            } else {
+                engine.lastError = "Video fehlgeschlagen: \(text ?? "unbekannt")"
+            }
+        }
+    }
+}
+
+// MARK: - Datenströme (Bogen-Modi und Foto-Auslöser)
 
 extension CaptureEngine: AVCaptureVideoDataOutputSampleBufferDelegate,
                          AVCaptureAudioDataOutputSampleBufferDelegate {
@@ -525,9 +769,7 @@ extension CaptureEngine: AVCaptureVideoDataOutputSampleBufferDelegate,
                                    from connection: AVCaptureConnection) {
         // Läuft direkt auf der Capture-Queue. Der Buffer wird sofort ins
         // laufende Segment geschrieben und dem Treiber zurückgegeben — nie
-        // aufbewahrt. Der alte Ringpuffer hat rohe Buffer sekundenlang
-        // gehalten; deren Pool ist klein, und war er leer, lieferte die Kamera
-        // keine Bilder mehr (Standbild + tote Auslöser, Feldtest 11.08.).
+        // aufbewahrt (deren Pool ist klein; leer = eingefrorener Sucher).
         let isVideo = output is AVCaptureVideoDataOutput
         q.ring?.ingest(sampleBuffer, isVideo: isVideo)
         if isVideo { analyseLuma(sampleBuffer) } else { analyseAudio(sampleBuffer) }
@@ -661,6 +903,9 @@ extension CaptureEngine: AVCapturePhotoCaptureDelegate {
 final class SegmentRing: @unchecked Sendable {
     var ringSeconds: Double = 5
     var slowFactor: Double = 1
+    /// Rotations-Metadatum in Grad (90 = Hochformat) — ohne das spielt jeder
+    /// Player die Segmente quer ab, weil die Kamera liegend liefert.
+    var rotationAngle: Double = 90
     /// Nach jeder Segment-Rotation (~1 Hz): gepufferte Sekunden.
     var onBuffered: ((Double) -> Void)?
     /// Fertiger Clip; nil = nichts zu sichern oder Zusammensetzen fehlgeschlagen.
@@ -687,7 +932,7 @@ final class SegmentRing: @unchecked Sendable {
 
         if writer == nil {
             guard isVideo else { return }        // Segmente beginnen mit einem Videobild
-            startSegment(at: pts)
+            startSegment(at: pts, like: buffer)
         }
         if isVideo, let end = clipEnd, pts >= end {
             finishClip()
@@ -696,7 +941,7 @@ final class SegmentRing: @unchecked Sendable {
         if isVideo, let start = segmentStart,
            CMTimeGetSeconds(pts - start) >= segmentSeconds {
             closeSegment()                        // rotieren …
-            startSegment(at: pts)                 // … und nahtlos weiter
+            startSegment(at: pts, like: buffer)   // … und nahtlos weiter
         }
         guard let w = writer, w.status == .writing,
               let input = isVideo ? videoIn : audioIn,
@@ -725,16 +970,27 @@ final class SegmentRing: @unchecked Sendable {
 
     // MARK: Segmente
 
-    private func startSegment(at pts: CMTime) {
+    private func startSegment(at pts: CMTime, like buffer: CMSampleBuffer) {
         let url = FileManager.default.temporaryDirectory
             .appendingPathComponent("hv-seg-\(UUID().uuidString).mov")
         guard let w = try? AVAssetWriter(outputURL: url, fileType: .mov) else { return }
+
+        // Abmessungen aus dem echten Kamerabild statt fester Annahme — sonst
+        // skaliert der Encoder und das Ergebnis wird weich.
+        var width = 1920, height = 1080
+        if let fd = CMSampleBufferGetFormatDescription(buffer) {
+            let dims = CMVideoFormatDescriptionGetDimensions(fd)
+            width = Int(dims.width)
+            height = Int(dims.height)
+        }
+
         let vIn = AVAssetWriterInput(mediaType: .video, outputSettings: [
             AVVideoCodecKey: AVVideoCodecType.h264,
-            AVVideoWidthKey: 1920,
-            AVVideoHeightKey: 1080,
+            AVVideoWidthKey: width,
+            AVVideoHeightKey: height,
         ])
         vIn.expectsMediaDataInRealTime = true
+        vIn.transform = CGAffineTransform(rotationAngle: rotationAngle * .pi / 180)
         if w.canAdd(vIn) { w.add(vIn) }
         let aIn = AVAssetWriterInput(mediaType: .audio, outputSettings: [
             AVFormatIDKey: kAudioFormatMPEG4AAC,
@@ -812,12 +1068,14 @@ final class SegmentRing: @unchecked Sendable {
             : comp.addMutableTrack(withMediaType: .audio,
                                    preferredTrackID: kCMPersistentTrackID_Invalid)
         var cursor = CMTime.zero
+        var transform = CGAffineTransform.identity
         for url in parts {
             let asset = AVURLAsset(url: url)
             guard let duration = try? await asset.load(.duration),
                   duration.seconds > 0,
                   let video = try? await asset.loadTracks(withMediaType: .video).first
             else { continue }
+            if let t = try? await video.load(.preferredTransform) { transform = t }
             let range = CMTimeRange(start: .zero, duration: duration)
             guard (try? vDst.insertTimeRange(range, of: video, at: cursor)) != nil else { continue }
             if let aDst, let audio = try? await asset.loadTracks(withMediaType: .audio).first {
@@ -826,6 +1084,9 @@ final class SegmentRing: @unchecked Sendable {
             cursor = cursor + duration
         }
         guard cursor.seconds > 0 else { return nil }
+        // Die Rotations-Metadaten der Segmente überleben die Composition nicht
+        // von allein — ohne das hier wäre der fertige Clip wieder quer.
+        vDst.preferredTransform = transform
         if slowFactor > 1 {
             comp.scaleTimeRange(CMTimeRange(start: .zero, duration: cursor),
                                 toDuration: CMTimeMultiplyByFloat64(cursor, multiplier: slowFactor))
@@ -848,15 +1109,58 @@ final class SegmentRing: @unchecked Sendable {
 
 struct CameraPreview: UIViewRepresentable {
     let session: AVCaptureSession
+    /// Tipp auf den Sucher: (Gerätepunkt 0…1 für Fokus, Ansichtspunkt für die UI).
+    var onTap: ((CGPoint, CGPoint) -> Void)? = nil
+    /// Pinch: Skalierung relativ zum Gestenbeginn, `true` = Geste beginnt gerade.
+    var onPinch: ((Double, Bool) -> Void)? = nil
 
     func makeUIView(context: Context) -> PreviewView {
         let v = PreviewView()
         v.previewLayer.session = session
         v.previewLayer.videoGravity = .resizeAspectFill
+
+        let tap = UITapGestureRecognizer(target: context.coordinator,
+                                         action: #selector(Coordinator.tapped(_:)))
+        v.addGestureRecognizer(tap)
+        let pinch = UIPinchGestureRecognizer(target: context.coordinator,
+                                             action: #selector(Coordinator.pinched(_:)))
+        v.addGestureRecognizer(pinch)
         return v
     }
 
-    func updateUIView(_ uiView: PreviewView, context: Context) {}
+    func updateUIView(_ uiView: PreviewView, context: Context) {
+        context.coordinator.onTap = onTap
+        context.coordinator.onPinch = onPinch
+    }
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(onTap: onTap, onPinch: onPinch)
+    }
+
+    final class Coordinator: NSObject {
+        var onTap: ((CGPoint, CGPoint) -> Void)?
+        var onPinch: ((Double, Bool) -> Void)?
+
+        init(onTap: ((CGPoint, CGPoint) -> Void)?, onPinch: ((Double, Bool) -> Void)?) {
+            self.onTap = onTap
+            self.onPinch = onPinch
+        }
+
+        @objc func tapped(_ g: UITapGestureRecognizer) {
+            guard let v = g.view as? PreviewView else { return }
+            let point = g.location(in: v)
+            let devicePoint = v.previewLayer.captureDevicePointConverted(fromLayerPoint: point)
+            onTap?(devicePoint, point)
+        }
+
+        @objc func pinched(_ g: UIPinchGestureRecognizer) {
+            switch g.state {
+            case .began: onPinch?(Double(g.scale), true)
+            case .changed: onPinch?(Double(g.scale), false)
+            default: break
+            }
+        }
+    }
 
     final class PreviewView: UIView {
         override class var layerClass: AnyClass { AVCaptureVideoPreviewLayer.self }

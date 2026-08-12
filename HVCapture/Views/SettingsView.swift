@@ -67,7 +67,8 @@ struct SettingsView: View {
     @AppStorage("bootAnimationEnabled") private var bootAnimationEnabled = true
     @AppStorage("hapticsEnabled") private var hapticsEnabled = true
 
-    @AppStorage("captureMode") private var captureMode = "clip"
+    @AppStorage("captureMode") private var captureMode = "arc"
+    @AppStorage("videoQuality") private var videoQuality = "1080p"
     @AppStorage("ringBufferSeconds") private var ringBufferSeconds = 4
     @AppStorage("postRollSeconds") private var postRollSeconds = 2
     @AppStorage("triggerBrightness") private var triggerBrightness = true
@@ -82,11 +83,13 @@ struct SettingsView: View {
     @State private var showDev = false
 
     // Nur in dieser Datei — die Aufnahme-Engine liest denselben Schlüssel.
-    // „clip" ist Geschichte: Video heisst immer Ringpuffer + Auslöser-Clips.
-    private let captureModes: [(key: String, label: String)] = [
-        ("video", "Video (Ringpuffer-Clips)"),
-        ("slowMotion", "Zeitlupe (hohe Bildrate)"),
-        ("photo", "Serienfotos"),
+    // Vier Modi, jeder mit einer Zeile, was er tut. „clip"/altes „video" werden
+    // in der Engine auf „arc" migriert.
+    private let captureModes: [(key: String, label: String, hint: String)] = [
+        ("photo", "Foto", "Einzel- und Serienfotos in voller Auflösung."),
+        ("video", "Video", "Ganz normales Video wie die System-Kamera — scharf, flüssig, stabilisiert."),
+        ("arc", "Bogen", "Ringpuffer-Clips: ein Auslöser sichert auch die Sekunden VOR dem Bogen."),
+        ("slowMotion", "Zeitlupe", "Hohe Bildrate, zeitlich gestreckt — für den Moment des Zündens."),
     ]
 
     var body: some View {
@@ -95,12 +98,35 @@ struct SettingsView: View {
             watchdogSection
 
             Section {
-                NavigationLink("Grenzwerte") { GuardSettingsView() }
-                    .accessibilityLabel("Grenzwerte des Stromwächters")
-                NavigationLink("Kalibrierung") { CalibrationView() }
-                    .accessibilityLabel("Kalibrierfahrt")
+                NavigationLink {
+                    GuardSettingsView()
+                } label: {
+                    Label("Grenzwerte", systemImage: "gauge.with.needle")
+                }
+                .accessibilityLabel("Grenzwerte des Stromwächters")
+                NavigationLink {
+                    CalibrationView()
+                } label: {
+                    Label("Kalibrierung", systemImage: "slider.horizontal.3")
+                }
+                .accessibilityLabel("Kalibrierfahrt")
             } header: {
                 Text("Wächter")
+            } footer: {
+                Text("Die Schwellen, ab denen die App selbstständig abschaltet — am besten per Kalibrierfahrt am echten Aufbau ermitteln.")
+            }
+
+            Section {
+                NavigationLink {
+                    RigPlannerView()
+                } label: {
+                    Label("Aufbau-Planer", systemImage: "square.grid.3x3.middle.filled")
+                }
+                .accessibilityLabel("Aufbau-Planer")
+            } header: {
+                Text("Aufbau")
+            } footer: {
+                Text("Konfiguriere 1–16 MOTs, EMI-Board und Vorlast und bekomme Schaltbild, Anleitung und Warnhinweise. Enthält eine reine Erklärung, was Resonanz mit Kondensatoren macht.")
             }
 
             designSection
@@ -241,6 +267,8 @@ struct SettingsView: View {
 
     // MARK: Aufnahme
 
+    private var isRingMode: Bool { captureMode == "arc" || captureMode == "slowMotion" }
+
     private var captureSection: some View {
         Section {
             Picker("Modus", selection: $captureMode) {
@@ -249,15 +277,34 @@ struct SettingsView: View {
                 }
             }
             .accessibilityLabel("Aufnahmemodus")
+            if let hint = captureModes.first(where: { $0.key == captureMode })?.hint {
+                Text(hint)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
 
-            Stepper("Ringpuffer: \(ringBufferSeconds) s",
-                    value: $ringBufferSeconds, in: 2...10)
-                .accessibilityLabel("Ringpuffer")
-                .accessibilityValue("\(ringBufferSeconds) Sekunden")
-            Stepper("Nachlauf: \(postRollSeconds) s",
-                    value: $postRollSeconds, in: 1...10)
-                .accessibilityLabel("Nachlauf")
-                .accessibilityValue("\(postRollSeconds) Sekunden")
+            if captureMode == "video" {
+                Picker("Auflösung", selection: $videoQuality) {
+                    Text("1080p").tag("1080p")
+                    Text("4K").tag("4k")
+                }
+                .pickerStyle(.segmented)
+                .accessibilityLabel("Video-Auflösung")
+                Text("4K ist schärfer, braucht aber mehr Speicher und lässt das iPhone schneller warm werden.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            if isRingMode {
+                Stepper("Ringpuffer: \(ringBufferSeconds) s",
+                        value: $ringBufferSeconds, in: 2...10)
+                    .accessibilityLabel("Ringpuffer")
+                    .accessibilityValue("\(ringBufferSeconds) Sekunden")
+                Stepper("Nachlauf: \(postRollSeconds) s",
+                        value: $postRollSeconds, in: 1...10)
+                    .accessibilityLabel("Nachlauf")
+                    .accessibilityValue("\(postRollSeconds) Sekunden")
+            }
 
             Toggle("Automatik", isOn: $triggerAuto)
                 .accessibilityLabel("Auslöser-Automatik")
@@ -662,7 +709,7 @@ struct DevModeView: View {
         Section("Selbsttest") {
             #if DEBUG
             Button("Selbsttest ausführen") {
-                selfCheckResult = RecorderSelfCheck.run()
+                selfCheckResult = RecorderSelfCheck.run() + "\n" + RigPlanSelfCheck.run()
             }
             .accessibilityLabel("Selbsttest ausführen")
             if let selfCheckResult {
