@@ -1,0 +1,120 @@
+{
+  "sourceLanguage" : "de",
+  "version" : "1.0",
+  "strings" : {
+    "Steuerung" : {
+      "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Control" } } }
+    },
+    "Kamera" : {
+      "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Camera" } } }
+    },
+    "Verlauf" : {
+      "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "History" } } }
+    },
+    "Einstellungen" : {
+      "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Settings" } } }
+    },
+    "Sessions" : {
+      "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Sessions" } } }
+    },
+    "Not-Aus" : {
+      "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Emergency Off" } } }
+    },
+    "Quittieren" : {
+      "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Acknowledge" } } }
+    },
+    "Betriebsart" : {
+      "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Mode" } } }
+    },
+    "Stromwächter" : {
+      "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Current Guard" } } }
+    },
+    "Live-Verlauf" : {
+      "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Live Trace" } } }
+    },
+    "Steckdose" : {
+      "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Smart Plug" } } }
+    },
+    "Selbstabschaltung" : {
+      "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Self Shut-Off" } } }
+    },
+    "Wächter" : {
+      "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Guard" } } }
+    },
+    "Grenzwerte" : {
+      "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Thresholds" } } }
+    },
+    "Kalibrierung" : {
+      "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Calibration" } } }
+    },
+    "Aufbau" : {
+      "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Rig" } } }
+    },
+    "Aufbau-Planer" : {
+      "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Rig Planner" } } }
+    },
+    "Design" : {
+      "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Appearance" } } }
+    },
+    "Aufnahme" : {
+      "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Recording" } } }
+    },
+    "Elektrode" : {
+      "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Electrode" } } }
+    },
+    "Daten" : {
+      "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Data" } } }
+    },
+    "Sicherheit & Alarme" : {
+      "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Safety & Alerts" } } }
+    },
+    "Trends" : {
+      "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Trends" } } }
+    },
+    "Energie & Kosten" : {
+      "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Energy & Cost" } } }
+    },
+    "Aufnahmen" : {
+      "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Captures" } } }
+    },
+    "Rekorde" : {
+      "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Records" } } }
+    },
+    "Elektroden" : {
+      "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Electrodes" } } }
+    },
+    "Vergleichen" : {
+      "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Compare" } } }
+    },
+    "Fertig" : {
+      "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Done" } } }
+    },
+    "Weiter" : {
+      "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Continue" } } }
+    },
+    "Los geht's" : {
+      "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Get Started" } } }
+    },
+    "Entsperren" : {
+      "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Unlock" } } }
+    },
+    "Backup erstellen" : {
+      "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Create Backup" } } }
+    },
+    "Backup wiederherstellen" : {
+      "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Restore Backup" } } }
+    },
+    "Mitteilung bei Abschaltung" : {
+      "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Notify on Shut-Off" } } }
+    },
+    "Alarmton bei Abschaltung" : {
+      "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Alarm Sound on Shut-Off" } } }
+    },
+    "App per Face ID sperren" : {
+      "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Lock App with Face ID" } } }
+    },
+    "Resonanz" : {
+      "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Resonance" } } }
+    }
+  }
+}

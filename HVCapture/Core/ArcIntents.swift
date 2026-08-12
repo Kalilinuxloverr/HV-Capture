@@ -71,7 +71,8 @@ enum LiveActivityController {
 
     static func update(watts: Double?, amps: Double?, volts: Double?,
                        secondsRemaining: Int?, armed: Bool,
-                       arcBurning: Bool, tripLabel: String?) {
+                       arcBurning: Bool, tripLabel: String?,
+                       recentWatts: [Double] = []) {
         guard let activity else { return }
 
         // Höchstens ~1 Update/s — häufigere Updates drosselt das System ohnehin.
@@ -83,7 +84,8 @@ enum LiveActivityController {
         let state = HVActivityAttributes.ContentState(
             watts: watts, amps: amps, volts: volts,
             secondsRemaining: secondsRemaining, armed: armed,
-            arcBurning: arcBurning, tripLabel: tripLabel)
+            arcBurning: arcBurning, tripLabel: tripLabel,
+            recentWatts: recentWatts)
         Task { await activity.update(.init(state: state, staleDate: nil)) }
     }
 

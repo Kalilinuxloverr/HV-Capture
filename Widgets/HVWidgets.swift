@@ -53,6 +53,11 @@ private struct LockScreenView: View {
                     .accessibilityLabel(state.statusText)
                 }
             }
+            if state.recentWatts.count > 1 {
+                Sparkline(values: state.recentWatts)
+                    .frame(height: 26)
+                    .accessibilityHidden(true)
+            }
             if let trip = state.tripLabel {
                 Label("Abgeschaltet — \(trip)", systemImage: "bolt.slash.fill")
                     .font(.footnote.weight(.semibold))
@@ -61,6 +66,33 @@ private struct LockScreenView: View {
             }
         }
         .padding()
+    }
+}
+
+// MARK: - Sparkline
+
+/// Mini-Leistungskurve für Sperrbildschirm und StandBy. Bewusst ohne Charts-
+/// Framework (im Widget schlank halten) — nur ein normierter Pfad.
+private struct Sparkline: View {
+    let values: [Double]
+
+    var body: some View {
+        GeometryReader { geo in
+            let maxV = max(values.max() ?? 1, 1)
+            let w = geo.size.width
+            let h = geo.size.height
+            let step = values.count > 1 ? w / CGFloat(values.count - 1) : w
+            Path { p in
+                for (i, v) in values.enumerated() {
+                    let x = CGFloat(i) * step
+                    let y = h - CGFloat(v / maxV) * h
+                    if i == 0 { p.move(to: CGPoint(x: x, y: y)) }
+                    else { p.addLine(to: CGPoint(x: x, y: y)) }
+                }
+            }
+            .stroke(Palette.accentGradient,
+                    style: StrokeStyle(lineWidth: 1.6, lineCap: .round, lineJoin: .round))
+        }
     }
 }
 

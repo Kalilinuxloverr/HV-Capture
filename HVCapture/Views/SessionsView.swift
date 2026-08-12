@@ -30,6 +30,18 @@ struct SessionsView: View {
     @State private var compareMode = false
     @State private var selection: [Session] = []
     @State private var comparePair: ComparePair?
+    @State private var query = ""
+
+    /// Nach Datum, Elektrode und Notiz filterbar. Leere Suche = alles.
+    private var filteredSessions: [Session] {
+        guard !query.isEmpty else { return store.sessions }
+        let q = query.lowercased()
+        return store.sessions.filter { s in
+            s.electrode.lowercased().contains(q)
+                || s.note.lowercased().contains(q)
+                || s.started.formatted(date: .abbreviated, time: .shortened).lowercased().contains(q)
+        }
+    }
 
     struct ComparePair: Identifiable {
         let a: Session
@@ -81,6 +93,13 @@ struct SessionsView: View {
 
             Section {
                 NavigationLink {
+                    TrendsView()
+                } label: {
+                    Label("Trends", systemImage: "chart.bar.xaxis")
+                }
+                .listRowBackground(Palette.card)
+                .accessibilityLabel("Trends über die Zeit")
+                NavigationLink {
                     EnergyCostView()
                 } label: {
                     Label("Energie & Kosten", systemImage: "eurosign.circle")
@@ -99,17 +118,23 @@ struct SessionsView: View {
             }
 
             Section(compareMode ? "Zwei Sessions zum Vergleich antippen" : "Sessions") {
-                ForEach(store.sessions) { session in
+                if filteredSessions.isEmpty {
+                    Text("Keine Session passt zur Suche.")
+                        .foregroundStyle(.secondary)
+                        .listRowBackground(Palette.card)
+                }
+                ForEach(filteredSessions) { session in
                     sessionRow(session)
                         .listRowBackground(Palette.card)
                 }
                 .onDelete { offsets in
-                    let doomed = offsets.map { store.sessions[$0] }
+                    let doomed = offsets.map { filteredSessions[$0] }
                     for s in doomed { store.delete(s) }
                 }
             }
         }
         .scrollContentBackground(.hidden)
+        .searchable(text: $query, prompt: "Elektrode, Datum, Notiz")
     }
 
     private var recordsGrid: some View {
@@ -229,6 +254,7 @@ struct SessionDetailView: View {
 
     @State private var csvURL: URL?
     @State private var bundleURL: URL?
+    @State private var pdfURL: URL?
     @State private var exportError: String?
 
     /// Einmal beim Öffnen berechnet — die Samples ändern sich hier nicht mehr,
@@ -270,6 +296,9 @@ struct SessionDetailView: View {
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
                 Menu {
+                    if let pdfURL {
+                        ShareLink(item: pdfURL) { Label("PDF-Bericht", systemImage: "doc.richtext") }
+                    }
                     if let csvURL {
                         ShareLink(item: csvURL) { Label("CSV", systemImage: "tablecells") }
                     }
@@ -279,7 +308,7 @@ struct SessionDetailView: View {
                 } label: {
                     Image(systemName: "square.and.arrow.up")
                 }
-                .disabled(csvURL == nil && bundleURL == nil)
+                .disabled(csvURL == nil && bundleURL == nil && pdfURL == nil)
                 .accessibilityLabel("Session teilen")
             }
         }
@@ -431,6 +460,7 @@ struct SessionDetailView: View {
         do {
             csvURL = try store.csvURL(for: session)
             bundleURL = try store.exportBundle(for: session)
+            pdfURL = SessionReport.pdf(for: session)
         } catch {
             exportError = error.localizedDescription
         }

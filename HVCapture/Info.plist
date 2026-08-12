@@ -2,6 +2,8 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
+	<key>CFBundleAllowMixedLocalizations</key>
+	<true/>
 	<key>CFBundleDevelopmentRegion</key>
 	<string>de</string>
 	<key>CFBundleDisplayName</key>
@@ -15,6 +17,7 @@
 	<key>CFBundleLocalizations</key>
 	<array>
 		<string>de</string>
+		<string>en</string>
 	</array>
 	<key>CFBundleName</key>
 	<string>$(PRODUCT_NAME)</string>
@@ -28,6 +31,8 @@
 	<false/>
 	<key>NSCameraUsageDescription</key>
 	<string>HV-Capture filmt und fotografiert die Lichtbögen deines Aufbaus.</string>
+	<key>NSFaceIDUsageDescription</key>
+	<string>HV-Capture kann die App per Face ID sperren, damit niemand versehentlich einschaltet.</string>
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>HV-Capture spricht die Steckdose direkt im Heimnetz an, um den MOT zu schalten und den Strom zu überwachen.</string>
 	<key>NSMicrophoneUsageDescription</key>

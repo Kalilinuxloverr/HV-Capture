@@ -195,6 +195,7 @@ final class ArcController {
     func acknowledgeTrip() {
         pendingTrip = nil
         statusMessage = nil
+        AlarmSound.stop()
     }
 
     // MARK: Messwertstrom
@@ -216,15 +217,22 @@ final class ArcController {
         recorder.ingest(reading, decision: decision)
         WatchBridge.shared.push(watts: reading?.watts, amps: reading?.amps,
                                 armed: isArmed, remaining: secondsRemaining)
+        // Jüngste Wattwerte für die Mini-Kurve der Live-Activity.
+        let spark = recorder.current?.samples.suffix(24).map(\.w) ?? []
         LiveActivityController.update(watts: reading?.watts, amps: reading?.amps,
                                       volts: reading?.volts,
                                       secondsRemaining: secondsRemaining,
                                       armed: isArmed, arcBurning: decision.arcBurning,
-                                      tripLabel: decision.trip?.label)
+                                      tripLabel: decision.trip?.label,
+                                      recentWatts: spark)
 
         if let trip = decision.trip {
             pendingTrip = TripRecord(reason: trip, detail: decision.detail, date: Date())
             Haptics.error()
+            // Alarmton und Mitteilung — beide nur bei quittierungspflichtigen
+            // Trips (das entscheiden die Helfer selbst).
+            AlarmSound.play()
+            TripNotifier.fire(reason: trip, detail: decision.detail)
             // Sofort synchron entschärfen: das eigentliche Abschalten ist
             // asynchron, und bis es durch ist, kämen sonst weitere Messwerte
             // hier an und würden denselben Vorgang mehrfach anstossen.
@@ -301,6 +309,7 @@ struct HVCaptureApp: App {
         SessionStore.shared.load()
         WatchBridge.shared.activate()     // ohne Uhr schlicht wirkungslos
         _ = ArcController.shared          // verbindet den Messwertstrom
+        Task { await TripNotifier.request() }
     }
 
     var body: some Scene {
@@ -310,10 +319,17 @@ struct HVCaptureApp: App {
                 .preferredColorScheme(.dark)
         }
         .onChange(of: scenePhase) { _, phase in
-            // Im Hintergrund kann die App den Selbstabschalt-Auftrag nicht
-            // zuverlässig erneuern. Statt darauf zu hoffen, wird abgeschaltet.
-            if phase == .background, ArcController.shared.isArmed {
-                Task { await ArcController.shared.disarm(reason: .deadMan) }
+            switch phase {
+            case .background:
+                // Im Hintergrund kann die App den Selbstabschalt-Auftrag nicht
+                // zuverlässig erneuern. Statt darauf zu hoffen, wird abgeschaltet.
+                if ArcController.shared.isArmed {
+                    Task { await ArcController.shared.disarm(reason: .deadMan) }
+                }
+                // Beim nächsten Aktivieren wieder nach Face ID fragen.
+                AppLock.shared.lockIfEnabled()
+            default:
+                break
             }
         }
     }

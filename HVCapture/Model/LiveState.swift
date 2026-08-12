@@ -19,6 +19,9 @@ struct HVActivityAttributes: ActivityAttributes {
         var arcBurning: Bool
         /// Gesetzt = abgeschaltet, Grund als Text.
         var tripLabel: String?
+        /// Jüngste Wattwerte für die Mini-Kurve auf dem Sperrbildschirm/StandBy.
+        /// Optional mit Default, damit ältere Activities weiter dekodieren.
+        var recentWatts: [Double] = []
     }
 
     var modeLabel: String

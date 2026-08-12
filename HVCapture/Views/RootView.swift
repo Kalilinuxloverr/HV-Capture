@@ -12,11 +12,16 @@ import SwiftUI
 struct RootView: View {
     @State private var showBoot = BootAnimation.isEnabled
     @State private var gatePassed = false
+    @State private var lock = AppLock.shared
+    @AppStorage("onboarded") private var onboarded = false
 
     var body: some View {
         ZStack {
             if showBoot {
                 BootAnimationView { withAnimation(.easeOut(duration: 0.35)) { showBoot = false } }
+                    .transition(.opacity)
+            } else if !onboarded {
+                OnboardingView { withAnimation(.easeOut(duration: 0.3)) { onboarded = true } }
                     .transition(.opacity)
             } else if !gatePassed {
                 SafetyGateView { withAnimation(.easeOut(duration: 0.3)) { gatePassed = true } }
@@ -24,6 +29,14 @@ struct RootView: View {
             } else {
                 MainTabs()
                     .transition(.opacity)
+            }
+
+            // Sperre liegt über allem — auch über der Checkliste, damit ein
+            // fremder Blick nichts sieht, bis Face ID bestätigt hat.
+            if lock.isLocked {
+                LockScreenGate()
+                    .transition(.opacity)
+                    .zIndex(1)
             }
         }
     }

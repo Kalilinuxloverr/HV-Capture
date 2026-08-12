@@ -16,6 +16,11 @@ struct ControlView: View {
     @AppStorage("pulseOff") private var pulseOff = 10
     @AppStorage("pulseRepeats") private var pulseRepeats = 3
     @AppStorage("liveThemeMaxWatts") private var maxWatts = 2000.0
+    @AppStorage("preRollSeconds") private var preRollSeconds = 3
+
+    /// Laufender Einschalt-Countdown (nil = keiner).
+    @State private var preRoll: Int?
+    @State private var preRollTask: Task<Void, Never>?
 
     var body: some View {
         ScrollView {
@@ -33,6 +38,64 @@ struct ControlView: View {
         }
         .appBackground()
         .navigationTitle("Steuerung")
+        .overlay { if let n = preRoll { preRollOverlay(n) } }
+    }
+
+    // MARK: - Einschalt-Countdown
+
+    /// Startet den Vorlauf, dann das Scharfschalten. Ohne Vorlauf (0 s) sofort.
+    private func beginArm() {
+        guard preRollSeconds > 0 else {
+            Task { await controller.arm() }
+            return
+        }
+        preRoll = preRollSeconds
+        preRollTask = Task {
+            for n in stride(from: preRollSeconds, through: 1, by: -1) {
+                guard !Task.isCancelled else { return }
+                await MainActor.run { preRoll = n }
+                Haptics.tap()
+                try? await Task.sleep(for: .seconds(1))
+            }
+            guard !Task.isCancelled else { return }
+            await MainActor.run { preRoll = nil }
+            await controller.arm()
+        }
+    }
+
+    private func cancelPreRoll() {
+        preRollTask?.cancel()
+        preRollTask = nil
+        preRoll = nil
+        Haptics.warning()
+    }
+
+    private func preRollOverlay(_ n: Int) -> some View {
+        ZStack {
+            Color.black.opacity(0.75).ignoresSafeArea()
+            VStack(spacing: 20) {
+                Text("Einschalten in")
+                    .font(.headline)
+                    .foregroundStyle(.secondary)
+                Text("\(n)")
+                    .font(.system(size: 96, weight: .bold, design: .rounded).monospacedDigit())
+                    .foregroundStyle(Palette.warn)
+                    .contentTransition(.numericText())
+                    .transaction { $0.animation = .snappy }
+                Button(role: .cancel) {
+                    cancelPreRoll()
+                } label: {
+                    Label("Abbrechen", systemImage: "xmark.circle.fill")
+                        .font(.title3.weight(.semibold))
+                        .frame(maxWidth: .infinity, minHeight: 52)
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(Palette.danger)
+                .padding(.horizontal, 40)
+            }
+        }
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("Einschalten in \(n) Sekunden, Abbrechen möglich")
     }
 
     // MARK: - Trip
@@ -118,12 +181,10 @@ struct ControlView: View {
                         isEnabled: controller.isArmed
                             || (controller.pendingTrip == nil && plug.isConfigured)
                     ) {
-                        Task {
-                            if controller.isArmed {
-                                await controller.disarm()
-                            } else {
-                                await controller.arm()
-                            }
+                        if controller.isArmed {
+                            Task { await controller.disarm() }
+                        } else {
+                            beginArm()
                         }
                     }
                 }

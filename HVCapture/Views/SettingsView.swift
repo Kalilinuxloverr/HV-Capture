@@ -79,8 +79,17 @@ struct SettingsView: View {
 
     @AppStorage("electrodeName") private var electrodeName = "Standard"
 
+    @AppStorage("tripNotificationsEnabled") private var tripNotifications = true
+    @AppStorage("alarmSoundEnabled") private var alarmSound = true
+    @AppStorage("appLockEnabled") private var appLock = false
+    @AppStorage("preRollSeconds") private var preRollSeconds = 3
+
     @State private var devTaps = 0
     @State private var showDev = false
+
+    @State private var backupURL: URL?
+    @State private var showImporter = false
+    @State private var backupMessage: String?
 
     // Nur in dieser Datei — die Aufnahme-Engine liest denselben Schlüssel.
     // Vier Modi, jeder mit einer Zeile, was er tut. „clip"/altes „video" werden
@@ -129,12 +138,90 @@ struct SettingsView: View {
                 Text("Konfiguriere 1–16 MOTs, EMI-Board und Vorlast und bekomme Schaltbild, Anleitung und Warnhinweise. Enthält eine reine Erklärung, was Resonanz mit Kondensatoren macht.")
             }
 
+            safetySection
             designSection
             captureSection
             electrodeSection
+            dataSection
             developerSection
         }
         .navigationTitle("Einstellungen")
+        .fileImporter(isPresented: $showImporter,
+                      allowedContentTypes: [.json]) { result in
+            switch result {
+            case .success(let url):
+                do {
+                    let added = try store.importBackup(from: url)
+                    backupMessage = "Backup eingelesen — \(added) neue Session\(added == 1 ? "" : "s")."
+                    Haptics.success()
+                } catch {
+                    backupMessage = "Backup konnte nicht gelesen werden: \(error.localizedDescription)"
+                    Haptics.error()
+                }
+            case .failure(let error):
+                backupMessage = error.localizedDescription
+            }
+        }
+        .alert("Backup", isPresented: Binding(get: { backupMessage != nil },
+                                              set: { if !$0 { backupMessage = nil } })) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text(backupMessage ?? "")
+        }
+    }
+
+    // MARK: Sicherheit & Alarme
+
+    private var safetySection: some View {
+        Section {
+            Toggle("Mitteilung bei Abschaltung", isOn: $tripNotifications)
+                .accessibilityLabel("Mitteilung bei Abschaltung")
+            Toggle("Alarmton bei Abschaltung", isOn: $alarmSound)
+                .accessibilityLabel("Alarmton bei Abschaltung")
+            Toggle("App per Face ID sperren", isOn: $appLock)
+                .accessibilityLabel("App per Face ID sperren")
+            Stepper(preRollSeconds == 0 ? "Einschalt-Countdown: aus"
+                                        : "Einschalt-Countdown: \(preRollSeconds) s",
+                    value: $preRollSeconds, in: 0...10)
+                .accessibilityLabel("Einschalt-Countdown")
+                .accessibilityValue(preRollSeconds == 0 ? "aus" : "\(preRollSeconds) Sekunden")
+        } header: {
+            Text("Sicherheit & Alarme")
+        } footer: {
+            Text("Mitteilung und Alarmton kommen nur bei echten Schutzabschaltungen (Grenzwert, Kleben, Datenverlust, Dead-Man) — nicht bei geplantem Aus. Der Countdown gibt dir vor dem Einschalten ein paar Sekunden zum Zurücktreten; Not-Aus geht immer sofort.")
+        }
+    }
+
+    // MARK: Daten
+
+    private var dataSection: some View {
+        Section {
+            Button {
+                do {
+                    backupURL = try store.exportBackup()
+                } catch {
+                    backupMessage = "Backup fehlgeschlagen: \(error.localizedDescription)"
+                }
+            } label: {
+                Label("Backup erstellen", systemImage: "arrow.up.doc")
+            }
+            .accessibilityLabel("Backup erstellen")
+            if let backupURL {
+                ShareLink(item: backupURL) {
+                    Label("Backup teilen / sichern", systemImage: "square.and.arrow.up")
+                }
+            }
+            Button {
+                showImporter = true
+            } label: {
+                Label("Backup wiederherstellen", systemImage: "arrow.down.doc")
+            }
+            .accessibilityLabel("Backup wiederherstellen")
+        } header: {
+            Text("Daten")
+        } footer: {
+            Text("Sichert alle Sessions und Einstellungen in eine Datei — zum Teilen, in die Cloud legen oder auf ein neues iPhone ziehen. Beim Wiederherstellen werden nur fehlende Sessions ergänzt, vorhandene bleiben.")
+        }
     }
 
     // MARK: Steckdose
